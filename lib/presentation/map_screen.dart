@@ -3,6 +3,7 @@ import 'dart:math';
 import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
+import 'package:flutter_compass/flutter_compass.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_google_places_sdk/flutter_google_places_sdk.dart'
@@ -52,22 +53,48 @@ class _MapScreenState extends State<MapScreen> {
   // Loading state
   bool _isLoading = false;
 
+  // Navigation Start
+  bool _startNavigation = false;
+
   // Islamabad default location — agar GPS nahi mila
   static const LatLng _defaultLocation = LatLng(33.6844, 73.0479);
 
+  // Compass stream — phone rotate hone par
+  StreamSubscription<CompassEvent>? _compassSub;
   @override
   void initState() {
     super.initState();
     // App shuru hote hi yeh 3 kaam karo
     _buildCarIcon(); // car icon banao
     _initLocation(); // location lo
+    _startCompass(); // compass start karo
   }
 
   @override
   void dispose() {
     _gpsSub?.cancel(); // GPS band karo jab screen close ho
+    _compassSub?.cancel(); // Compass band karo jab screen close ho
     _mapController?.dispose();
     super.dispose();
+  }
+
+  void _startCompass() {
+    // FlutterCompass.events — ek stream hai
+    // har baar phone rotate hoga, naya event aayega
+    _compassSub = FlutterCompass.events?.listen((CompassEvent event) {
+      // event.heading — degrees mein direction
+      // null bhi aa sakta hai agar sensor nahi hai device mein
+      if (event.heading == null) return;
+
+      setState(() {
+        // Sirf tab compass use karo
+        // jab GPS heading nahi aa rahi (gaadi ruki ho)
+        // Agar gaadi chal rahi hai toh GPS heading better hai
+        if (_gpsSub == null) {
+          _heading = event.heading!;
+        }
+      });
+    });
   }
 
   // Baaki functions yahan aayenge...
@@ -140,6 +167,8 @@ class _MapScreenState extends State<MapScreen> {
   Future<void> _initLocation() async {
     // ─── Step 1: Permission check ───────────────
     // Pehle dekho permission hai ya nahi
+
+    print("checking location permission");
     LocationPermission permission = await Geolocator.checkPermission();
 
     // Agar pehle kabhi nahi maangi
@@ -181,9 +210,6 @@ class _MapScreenState extends State<MapScreen> {
       // ─── Step 3: Camera wahan le jao ────────────
       // Map ko apni location par center karo
       _mapController?.animateCamera(CameraUpdate.newLatLngZoom(myLocation, 15));
-
-      // ─── Step 4: Live tracking shuru karo ───────
-      _startLiveTracking();
     } catch (e) {
       // Kuch gadbad hui toh default use karo
       print('Location error: $e');
@@ -195,6 +221,9 @@ class _MapScreenState extends State<MapScreen> {
 
   void _startLiveTracking() {
     // Pehle agar pehle se chal raha hai toh band karo
+
+    print("live tracking started");
+
     _gpsSub?.cancel();
 
     // GPS ko sun'na shuru karo
@@ -323,7 +352,7 @@ class _MapScreenState extends State<MapScreen> {
         Polyline(
           polylineId: const PolylineId('route'),
           points: result.points,
-          color: const Color(0xFF4285F4),
+          color: Colors.yellow,
           width: 6,
         ),
       };
@@ -626,7 +655,45 @@ class _MapScreenState extends State<MapScreen> {
                     ),
 
                     const SizedBox(height: 12),
-
+                    // "Route clear karo" button ke UPAR yeh add karo:
+                    SizedBox(
+                      width: double.infinity,
+                      child: ElevatedButton.icon(
+                        onPressed: () {
+                          setState(() {
+                            _startNavigation = !_startNavigation;
+                          });
+                          if (_startNavigation) {
+                            _startLiveTracking();
+                          } else {
+                            _getRoute(_currentLocation!, _destination!);
+                          }
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(
+                              content: Text('Navigation shuru ho gaya!'),
+                              backgroundColor: Colors.green,
+                              duration: Duration(seconds: 2),
+                            ),
+                          );
+                        },
+                        icon: const Icon(Icons.navigation_rounded),
+                        label:
+                            _startNavigation
+                                ? const Text('Stop Navigation')
+                                : const Text('Start Navigation'),
+                        style: ElevatedButton.styleFrom(
+                          backgroundColor: const Color(0xFF4285F4),
+                          foregroundColor: Colors.white,
+                          padding: const EdgeInsets.symmetric(vertical: 14),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(
+                      height: 8,
+                    ), // thoda gap "Route clear" se pehle
                     // Route clear karne ka button
                     SizedBox(
                       width: double.infinity,
@@ -638,6 +705,13 @@ class _MapScreenState extends State<MapScreen> {
                             _polylines = {};
                             _fullRoute = [];
                             _routeResult = null;
+
+                            _mapController?.animateCamera(
+                              CameraUpdate.newLatLngZoom(
+                                _currentLocation ?? _defaultLocation,
+                                15,
+                              ),
+                            );
                           });
                         },
                         icon: const Icon(Icons.close_rounded),
