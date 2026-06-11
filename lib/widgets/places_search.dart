@@ -1,9 +1,13 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_google_places_sdk/flutter_google_places_sdk.dart';
+import 'package:http/http.dart' as http;
+import 'package:google_maps_flutter/google_maps_flutter.dart' as maps;
 
 class PlacesSearch extends StatefulWidget {
   const PlacesSearch({super.key, required this.onPlaceSelected});
-  final Function(LatLng) onPlaceSelected;
+  final Function(maps.LatLng) onPlaceSelected;
 
   @override
   State<PlacesSearch> createState() => _PlacesSearchState();
@@ -12,7 +16,7 @@ class PlacesSearch extends StatefulWidget {
 class _PlacesSearchState extends State<PlacesSearch> {
   final TextEditingController _controller = TextEditingController();
   late FlutterGooglePlacesSdk _places;
-  List<AutocompletePrediction> _predictions = [];
+  List<Map<String, Object>> _predictions = [];
   bool _isLoading = false;
   @override
   void initState() {
@@ -24,28 +28,40 @@ class _PlacesSearchState extends State<PlacesSearch> {
   Future<void> _onSearchChanged(String query) async {
     if (query.length < 2) {
       setState(() => _predictions = []);
+      return;
     }
+
     setState(() => _isLoading = true);
 
     try {
-      final result = await _places.findAutocompletePredictions(
-        query,
-        locationBias: LatLngBounds(
-          southwest: const LatLng(
-            lat: 23.6345,
-            lng: 60.8729,
-          ), // Pakistan ka SW corner
-          northeast: const LatLng(
-            lat: 37.0841,
-            lng: 77.8374,
-          ), // Pakistan ka NE corner
-        ),
-        placeTypesFilter: [PlaceTypeFilter.CITIES],
-
-        countries: ['pk'], // Pakistan ke liye filter
+      final uri = Uri.parse(
+        'https://nominatim.openstreetmap.org/search'
+        '?q=${Uri.encodeComponent(query)}'
+        '&format=json&countrycodes=pk&limit=5',
       );
+
+      final response = await http.get(
+        uri,
+        headers: {
+          'User-Agent':
+              'OrsMapApp/1.0', // zaruri hai — Nominatim require karta hai
+        },
+      );
+
+      final results = jsonDecode(response.body) as List;
+
       setState(() {
-        _predictions = result.predictions ?? [];
+        _predictions =
+            results
+                .map(
+                  (r) => {
+                    'name': r['display_name'] as String,
+                    'lat': double.parse(r['lat']),
+                    'lon': double.parse(r['lon']),
+                  },
+                )
+                .toList();
+
         _isLoading = false;
       });
     } catch (e) {
@@ -54,14 +70,14 @@ class _PlacesSearchState extends State<PlacesSearch> {
     }
   }
 
-  Future<void> _onPlaceTapped(AutocompletePrediction prediction) async {
+  Future<void> _onPlaceTapped(Map<String, Object> prediction) async {
     // Search bar band karo
     _controller.clear();
     setState(() => _predictions = []);
 
     // placeId se actual coordinates lo
     final details = await _places.fetchPlace(
-      prediction.placeId,
+      prediction['placeId'] as String,
       fields: [PlaceField.Location], // sirf location chahiye
     );
 
@@ -69,7 +85,7 @@ class _PlacesSearchState extends State<PlacesSearch> {
 
     if (location != null) {
       // Parent ko coordinates do
-      widget.onPlaceSelected(LatLng(lat: location.lat, lng: location.lng));
+      widget.onPlaceSelected(maps.LatLng(location.lat, location.lng));
     }
   }
 
@@ -91,7 +107,7 @@ class _PlacesSearchState extends State<PlacesSearch> {
             // Har change par autocomplete call karo
             onChanged: _onSearchChanged,
             decoration: InputDecoration(
-              hintText: 'Kahan jaana hai?',
+              hintText: 'where you want to go?',
               prefixIcon: const Icon(Icons.search),
               suffixIcon:
                   _isLoading
@@ -135,11 +151,20 @@ class _PlacesSearchState extends State<PlacesSearch> {
                     color: Color(0xFF4285F4),
                   ),
                   // Poora naam — jaise "F-6 Markaz, Islamabad, Pakistan"
-                  title: Text(
-                    p.fullText ?? '',
-                    style: const TextStyle(fontSize: 14),
-                  ),
-                  onTap: () => _onPlaceTapped(p),
+                  // ListTile mein
+                  title: Text(_predictions[index]['name'].toString()),
+                  onTap: () {
+                    final p = _predictions[index];
+
+                    print("the predictions are $p");
+
+                    widget.onPlaceSelected(
+                      maps.LatLng(p['lat'] as double, p['lon'] as double),
+                    );
+
+                    _predictions.clear();
+                    FocusScope.of(context).unfocus(); // keyboard band karo
+                  },
                 );
               },
             ),
