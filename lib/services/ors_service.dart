@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:http/http.dart' as http;
+import 'package:ors_map_test/models/route_step.dart';
 
 class OrsService {
   static const String _apiKey =
@@ -53,10 +54,19 @@ class OrsService {
       final distanceMeters = segment['distance'] as double;
       final durationSeconds = segment['duration'] as double;
 
+      // yahan se steps nikalo — segment ke andar hain
+      final stepsJson = segment['steps'] as List;
+
+      final steps =
+          stepsJson
+              .map((s) => RouteStep.fromJson(s as Map<String, dynamic>))
+              .toList();
+
       return RouteResult(
         points: points,
         distanceMeters: distanceMeters,
         durationSeconds: durationSeconds,
+        steps: steps,
       );
     } catch (e) {
       print('ORS Exception: $e');
@@ -69,11 +79,13 @@ class RouteResult {
   final List<LatLng> points;
   final double distanceMeters;
   final double durationSeconds;
+  final List<RouteStep> steps;
 
   RouteResult({
     required this.points,
     required this.distanceMeters,
     required this.durationSeconds,
+    required this.steps,
   });
 
   // Helper getters

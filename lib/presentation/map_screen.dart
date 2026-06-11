@@ -59,6 +59,9 @@ class _MapScreenState extends State<MapScreen> {
   // Islamabad default location — agar GPS nahi mila
   static const LatLng _defaultLocation = LatLng(33.6844, 73.0479);
 
+  int _currentStepIndex = 0; // abhi konsa step chal raha hai
+  bool _isNavigating = false;
+
   // Compass stream — phone rotate hone par
   StreamSubscription<CompassEvent>? _compassSub;
   @override
@@ -99,68 +102,16 @@ class _MapScreenState extends State<MapScreen> {
 
   // Baaki functions yahan aayenge...
   Future<void> _buildCarIcon() async {
-    // Ek virtual kagaz banao jis par draw karein
-    final recorder = ui.PictureRecorder();
-    final canvas = Canvas(recorder);
-
-    // ─── Car Body ───────────────────────────────
-    // Neela rounded rectangle — car ka body
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(10, 8, 40, 52),
-        const Radius.circular(10),
-      ),
-      Paint()..color = const Color(0xFF1E3A8A), // dark blue
+    // Assets se PNG lo, size do 80x80 (adjust kar sakte ho)
+    final icon = await BitmapDescriptor.fromAssetImage(
+      const ImageConfiguration(size: Size(80, 80)),
+      'assets/car_icon.png',
     );
 
-    // ─── Windshield ─────────────────────────────
-    // Light blue rectangle — sheesha
-    canvas.drawRRect(
-      RRect.fromRectAndRadius(
-        const Rect.fromLTWH(15, 12, 30, 22),
-        const Radius.circular(5),
-      ),
-      Paint()..color = const Color(0xFF93C5FD), // light blue
-    );
-
-    // ─── 4 Wheels ───────────────────────────────
-    // Har wheel ke liye 2 circles — outer aur rim
-    final wheelPositions = [
-      const Offset(12, 20), // front left
-      const Offset(48, 20), // front right
-      const Offset(12, 48), // back left
-      const Offset(48, 48), // back right
-    ];
-
-    for (final pos in wheelPositions) {
-      // Outer wheel — kala
-      canvas.drawCircle(pos, 7, Paint()..color = const Color(0xFF111111));
-      // Rim — gray
-      canvas.drawCircle(pos, 4, Paint()..color = const Color(0xFF888888));
-    }
-
-    // ─── Headlights ─────────────────────────────
-    // Do chote yellow circles — aage
-    for (final pos in [const Offset(18, 8), const Offset(42, 8)]) {
-      canvas.drawCircle(
-        pos,
-        4,
-        Paint()..color = const Color(0xFFFCD34D), // yellow
-      );
-    }
-
-    // ─── Convert to PNG ─────────────────────────
-    // Virtual kagaz se photo khecho
-    final picture = recorder.endRecording();
-    final img = await picture.toImage(60, 68);
-    final data = await img.toByteData(format: ui.ImageByteFormat.png);
-
-    // Agar widget band ho gaya toh kuch mat karo
     if (!mounted) return;
 
-    // BitmapDescriptor banao aur save karo
     setState(() {
-      _carIcon = BitmapDescriptor.fromBytes(data!.buffer.asUint8List());
+      _carIcon = icon;
     });
   }
 
@@ -288,6 +239,7 @@ class _MapScreenState extends State<MapScreen> {
     }
 
     // Do polylines — gray peeche, blue aage
+    _checkStepAdvance(carPos);
     setState(() {
       _polylines = {
         Polyline(
@@ -472,64 +424,77 @@ class _MapScreenState extends State<MapScreen> {
           ),
 
           // ─── Layer 2: Top instruction bar ─────────
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: Container(
-                margin: const EdgeInsets.all(12),
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 16,
-                  vertical: 12,
-                ),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.1),
-                      blurRadius: 8,
-                    ),
-                  ],
-                ),
-                child: Row(
-                  children: [
-                    const Icon(
-                      Icons.touch_app_rounded,
-                      color: Color(0xFF4285F4),
-                      size: 20,
-                    ),
-                    const SizedBox(width: 10),
-                    Text(
-                      _destination == null
-                          ? 'Tap on Map - Set destination'
-                          : 'Route Found',
-                      style: const TextStyle(
-                        fontSize: 13,
-                        fontWeight: FontWeight.w500,
+          if (!_isNavigating)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                child: Container(
+                  margin: const EdgeInsets.all(12),
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 16,
+                    vertical: 12,
+                  ),
+                  decoration: BoxDecoration(
+                    color: Colors.white,
+                    borderRadius: BorderRadius.circular(12),
+                    boxShadow: [
+                      BoxShadow(
+                        color: Colors.black.withOpacity(0.1),
+                        blurRadius: 8,
                       ),
-                    ),
-                  ],
+                    ],
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(
+                        Icons.touch_app_rounded,
+                        color: Color(0xFF4285F4),
+                        size: 20,
+                      ),
+                      const SizedBox(width: 10),
+                      Text(
+                        _destination == null
+                            ? 'Tap on Map - Set destination'
+                            : 'Route Found',
+                        style: const TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
-          ),
+
+          // Navigation chal raha hai toh nav card dikhao
+          if (_isNavigating &&
+              _routeResult != null &&
+              _routeResult!.steps.isNotEmpty)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(child: _buildNavCard()),
+            ),
 
           // ─── Layer 3: Loading indicator ────────────
-          Positioned(
-            top: 0,
-            left: 0,
-            right: 0,
-            child: SafeArea(
-              child: PlacesSearch(
-                onPlaceSelected: (latLng) {
-                  // Bilkul waise hi jaise tap se destination set hota tha
-                  _onMapTapped(latLng);
-                },
+          if (!_isNavigating)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: SafeArea(
+                child: PlacesSearch(
+                  onPlaceSelected: (latLng) {
+                    // Bilkul waise hi jaise tap se destination set hota tha
+                    _onMapTapped(latLng);
+                  },
+                ),
               ),
             ),
-          ),
           if (_isLoading)
             Container(
               color: Colors.black.withOpacity(0.3),
@@ -664,6 +629,9 @@ class _MapScreenState extends State<MapScreen> {
                         onPressed: () {
                           setState(() {
                             _startNavigation = !_startNavigation;
+                            _currentStepIndex =
+                                0; // navigation start hone par step index reset karo
+                            _isNavigating = _startNavigation;
                           });
                           if (_startNavigation) {
                             _startLiveTracking();
@@ -726,6 +694,191 @@ class _MapScreenState extends State<MapScreen> {
             ),
         ],
       ),
+    );
+  }
+
+  Widget _buildNavCard() {
+    final steps = _routeResult!.steps;
+
+    // Abhi konsa step? — _currentStepIndex se lo
+    final current = steps[_currentStepIndex];
+
+    // Agla step hai? — preview ke liye
+    final hasNext = _currentStepIndex + 1 < steps.length;
+    final next = hasNext ? steps[_currentStepIndex + 1] : null;
+
+    return Container(
+      margin: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1A1A2E), // dark blue
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 12)],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          // ─── Current Step ──────────────────────
+          Padding(
+            padding: const EdgeInsets.all(16),
+            child: Row(
+              children: [
+                // Turn icon
+                Container(
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.white12,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Icon(
+                    current.icon, // RouteStep ka icon getter ✅
+                    color: Colors.white,
+                    size: 32,
+                  ),
+                ),
+                const SizedBox(width: 14),
+
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      // Distance
+                      Text(
+                        current
+                            .distanceText, // RouteStep ka distanceText getter ✅
+                        style: const TextStyle(
+                          color: Color(0xFF4FC3F7),
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      // Instruction
+                      Text(
+                        current.instruction,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 14,
+                        ),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            ),
+          ),
+
+          // ─── Next Step Preview ─────────────────
+          if (next != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              decoration: const BoxDecoration(
+                color: Colors.white10,
+                borderRadius: BorderRadius.vertical(
+                  bottom: Radius.circular(16),
+                ),
+              ),
+              child: Row(
+                children: [
+                  Icon(next.icon, color: Colors.white60, size: 18),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Then: ${next.instruction}',
+                      style: const TextStyle(
+                        color: Colors.white60,
+                        fontSize: 12,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
+  void _checkStepAdvance(LatLng carPos) {
+    // Navigation nahi chal raha toh kuch mat karo
+    if (!_isNavigating) return;
+    if (_routeResult == null || _routeResult!.steps.isEmpty) return;
+
+    // Last step par hain toh advance mat karo
+    if (_currentStepIndex >= _routeResult!.steps.length - 1) {
+      // Destination check karo
+      if (_destination != null) {
+        final dist = _haversineMeters(carPos, _destination!);
+        if (dist < 30) _onDestinationReached(); // 30m ke andar = pahunch gaye
+      }
+      return;
+    }
+
+    // Current step ka end point nikalo
+    final endPoint = _getStepEndPoint(_currentStepIndex);
+
+    // Car kitni door hai us point se?
+    final distance = _haversineMeters(carPos, endPoint);
+
+    // 25 meter se kam → next step!
+    if (distance < 25) {
+      setState(() {
+        _currentStepIndex++;
+      });
+    }
+  }
+
+  LatLng _getStepEndPoint(int stepIndex) {
+    if (_fullRoute.isEmpty) return _currentLocation ?? _defaultLocation;
+
+    // Ab tak kitni distance cover hui — sab steps ki
+    double cumulative = 0;
+    for (int i = 0; i <= stepIndex; i++) {
+      cumulative += _routeResult!.steps[i].distance;
+    }
+
+    // Yeh distance poori route mein kahan hai? — ratio nikalo
+    // Jaise 1200m / 5400m = 0.22 → route ka 22% point
+    final ratio = (cumulative / _routeResult!.distanceMeters).clamp(0.0, 1.0);
+
+    // Route array mein us ratio ka index
+    final index = (ratio * (_fullRoute.length - 1)).toInt();
+    return _fullRoute[index];
+  }
+
+  void _onDestinationReached() {
+    _gpsSub?.cancel();
+
+    setState(() {
+      _isNavigating = false;
+      _currentStepIndex = 0;
+    });
+
+    showDialog(
+      context: context,
+      builder:
+          (_) => AlertDialog(
+            title: const Text('🎉 Pahunch Gaye!'),
+            content: const Text('Aap apni destination par pahunch gaye.'),
+            actions: [
+              TextButton(
+                onPressed: () {
+                  Navigator.pop(context);
+                  setState(() {
+                    _destination = null;
+                    _markers = {};
+                    _polylines = {};
+                    _fullRoute = [];
+                    _routeResult = null;
+                  });
+                },
+                child: const Text('Done'),
+              ),
+            ],
+          ),
     );
   }
 }
