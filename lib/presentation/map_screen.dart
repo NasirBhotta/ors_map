@@ -431,8 +431,8 @@ class _MapScreenState extends State<MapScreen> {
                 ),
             },
 
-            myLocationButtonEnabled: false,
-            zoomControlsEnabled: false,
+            myLocationButtonEnabled: true,
+            zoomControlsEnabled: true,
           ),
 
           // ─── Layer 2: Top instruction bar ─────────
