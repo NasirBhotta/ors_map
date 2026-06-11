@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:ors_map_test/services/ors_service.dart';
+import 'package:ors_map_test/widgets/places_search.dart';
 
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
@@ -433,6 +434,8 @@ class _MapScreenState extends State<MapScreen> {
 
             myLocationButtonEnabled: true,
             zoomControlsEnabled: true,
+
+            compassEnabled: true,
           ),
 
           // ─── Layer 2: Top instruction bar ─────────
@@ -481,25 +484,38 @@ class _MapScreenState extends State<MapScreen> {
           ),
 
           // ─── Layer 3: Loading indicator ────────────
-          if (_isLoading)
-            Container(
-              color: Colors.black.withOpacity(0.3),
-              child: const Center(
-                child: Card(
-                  child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircularProgressIndicator(color: Color(0xFF4285F4)),
-                        SizedBox(height: 12),
-                        Text('Fetching Route'),
-                      ],
-                    ),
-                  ),
-                ),
+          Positioned(
+            top: 0,
+            left: 0,
+            right: 0,
+            child: SafeArea(
+              child: PlacesSearch(
+                onPlaceSelected: (latLng) {
+                  // Bilkul waise hi jaise tap se destination set hota tha
+                  _onMapTapped(latLng as LatLng);
+                },
               ),
             ),
+          ),
+          // if (_isLoading)
+          //   Container(
+          //     color: Colors.black.withOpacity(0.3),
+          //     child: const Center(
+          //       child: Card(
+          //         child: Padding(
+          //           padding: EdgeInsets.all(20),
+          //           child: Column(
+          //             mainAxisSize: MainAxisSize.min,
+          //             children: [
+          //               CircularProgressIndicator(color: Color(0xFF4285F4)),
+          //               SizedBox(height: 12),
+          //               Text('Fetching Route'),
+          //             ],
+          //           ),
+          //         ),
+          //       ),
+          //     ),
+          //   ),
 
           // ─── Layer 4: Bottom info card ─────────────
           // Sirf tab dikhao jab route aaya ho
