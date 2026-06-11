@@ -238,7 +238,9 @@ class _MapScreenState extends State<MapScreen> {
       setState(() {
         _currentLocation = newLocation;
         // Heading — car kis direction mein ja rahi hai
-        _heading = position.heading.isNaN ? 0 : position.heading;
+        if (position.speed > 0.5 && !position.heading.isNaN) {
+          _heading = position.heading; // GPS se
+        }
       });
 
       // Agar route chal raha hai toh polyline update karo
