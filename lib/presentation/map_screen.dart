@@ -9,6 +9,7 @@ import 'package:google_maps_flutter/google_maps_flutter.dart';
 import 'package:flutter_google_places_sdk/flutter_google_places_sdk.dart'
     as places;
 import 'package:ors_map_test/services/ors_service.dart';
+import 'package:ors_map_test/services/tts_service.dart';
 import 'package:ors_map_test/widgets/places_search.dart';
 
 class MapScreen extends StatefulWidget {
@@ -64,6 +65,8 @@ class _MapScreenState extends State<MapScreen> {
 
   // Compass stream — phone rotate hone par
   StreamSubscription<CompassEvent>? _compassSub;
+
+  final TtsService _tts = TtsService();
   @override
   void initState() {
     super.initState();
@@ -76,6 +79,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _gpsSub?.cancel(); // GPS band karo jab screen close ho
+    _tts.stop();
     _compassSub?.cancel(); // Compass band karo jab screen close ho
     _mapController?.dispose();
     super.dispose();
@@ -635,6 +639,9 @@ class _MapScreenState extends State<MapScreen> {
                           });
                           if (_startNavigation) {
                             _startLiveTracking();
+                            if (_routeResult!.steps.isNotEmpty) {
+                              _tts.speak(_routeResult!.steps[0].instruction);
+                            }
                           } else {
                             _getRoute(_currentLocation!, _destination!);
                           }
@@ -828,6 +835,9 @@ class _MapScreenState extends State<MapScreen> {
       setState(() {
         _currentStepIndex++;
       });
+
+      final newInstruction = _routeResult!.steps[_currentStepIndex].instruction;
+      _tts.speak(newInstruction);
     }
   }
 
@@ -850,6 +860,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   void _onDestinationReached() {
+    _tts.speak('You have reached your destination'); // ← ADD KARO
     _gpsSub?.cancel();
 
     setState(() {

@@ -11,12 +11,13 @@ class TtsService {
 
   Future<void> init() async {
     if (_isInitialized) return;
-
+    final engines = await _tts.getEngines;
+    print('Available TTS Engines: $engines');
     await _tts.setLanguage('en-US');
     await _tts.setSpeechRate(0.5); // thodi slow — navigation ke liye better
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
-
+    await _tts.setEngine('com.google.android.tts'); // ← ADD KARO
     _isInitialized = true;
   }
 
