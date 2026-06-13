@@ -144,7 +144,6 @@ class _PlacesSearchState extends State<PlacesSearch> {
               itemCount: _predictions.length,
               separatorBuilder: (_, __) => const Divider(height: 1),
               itemBuilder: (context, index) {
-                final p = _predictions[index];
                 return ListTile(
                   leading: const Icon(
                     Icons.location_on_outlined,
@@ -155,8 +154,6 @@ class _PlacesSearchState extends State<PlacesSearch> {
                   title: Text(_predictions[index]['name'].toString()),
                   onTap: () {
                     final p = _predictions[index];
-
-                    print("the predictions are $p");
 
                     widget.onPlaceSelected(
                       maps.LatLng(p['lat'] as double, p['lon'] as double),

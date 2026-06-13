@@ -63,6 +63,15 @@ class _MapScreenState extends State<MapScreen> {
   // Compass stream — phone rotate hone par
   StreamSubscription<CompassEvent>? _compassSub;
 
+  // Kitni baar consecutively off route detect hua
+  int _offRouteCount = 0;
+
+  // Rerouting chal rahi hai toh dobara mat karo
+  bool _isRerouting = false;
+
+  // Navigation kab shuru hua
+  DateTime? _navigationStartTime;
+
   final TtsService _tts = TtsService();
   @override
   void initState() {
@@ -232,15 +241,40 @@ class _MapScreenState extends State<MapScreen> {
       }
     }
 
-    // Off route check — 50 meter se zyada door
+    // ─── Off route check ────────────────────────────
     if (minDist > 50 && _destination != null) {
-      // Naya route fetch karo current position se
-      _getRoute(carPos, _destination!);
+      // Agar already rerouting chal rahi hai toh rukao
+      if (_isRerouting) return;
+
+      // Navigation abhi abhi shuru hua — 8 second wait karo
+      if (_navigationStartTime != null) {
+        final elapsed = DateTime.now().difference(_navigationStartTime!);
+        if (elapsed.inSeconds < 8) return;
+      }
+
+      // Consecutive count badao
+      _offRouteCount++;
+
+      // Sirf 3 baar consecutive off route hone par reroute karo
+      // Yeh GPS noise ko filter karta hai
+      if (_offRouteCount < 3) return;
+
+      // Ab pakka off route hai — reroute karo
+      _offRouteCount = 0;
+      _isRerouting = true;
+      _getRoute(carPos, _destination!).then((_) {
+        _isRerouting = false;
+      });
       return;
     }
 
-    // Do polylines — gray peeche, blue aage
+    // On route hai — counter reset karo
+    _offRouteCount = 0;
+
+    // Step advance check karo
     _checkStepAdvance(carPos);
+
+    // Do polylines draw karo
     setState(() {
       _polylines = {
         Polyline(
@@ -636,11 +670,13 @@ class _MapScreenState extends State<MapScreen> {
                           });
                           if (_startNavigation) {
                             _startLiveTracking();
+                            _navigationStartTime = DateTime.now();
                             if (_routeResult!.steps.isNotEmpty) {
                               _tts.speak(_routeResult!.steps[0].instruction);
                             }
                           } else {
                             _getRoute(_currentLocation!, _destination!);
+                            _navigationStartTime = null;
                           }
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(
