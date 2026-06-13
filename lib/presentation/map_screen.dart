@@ -1,13 +1,10 @@
 import 'dart:async';
 import 'dart:math';
-import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:google_maps_flutter/google_maps_flutter.dart';
-import 'package:flutter_google_places_sdk/flutter_google_places_sdk.dart'
-    as places;
 import 'package:ors_map_test/services/ors_service.dart';
 import 'package:ors_map_test/services/tts_service.dart';
 import 'package:ors_map_test/widgets/places_search.dart';
