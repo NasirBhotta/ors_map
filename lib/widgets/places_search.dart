@@ -1,7 +1,6 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
-import 'package:flutter_google_places_sdk/flutter_google_places_sdk.dart';
 import 'package:http/http.dart' as http;
 import 'package:google_maps_flutter/google_maps_flutter.dart' as maps;
 
@@ -15,15 +14,8 @@ class PlacesSearch extends StatefulWidget {
 
 class _PlacesSearchState extends State<PlacesSearch> {
   final TextEditingController _controller = TextEditingController();
-  late FlutterGooglePlacesSdk _places;
   List<Map<String, Object>> _predictions = [];
   bool _isLoading = false;
-  @override
-  void initState() {
-    super.initState();
-    // SDK initialize karo apni API key se
-    _places = FlutterGooglePlacesSdk('AIzaSyDokWAEammXOAyow94XdZ-CC1N6u_mCJ1k');
-  }
 
   Future<void> _onSearchChanged(String query) async {
     if (query.length < 2) {
@@ -66,26 +58,7 @@ class _PlacesSearchState extends State<PlacesSearch> {
       });
     } catch (e) {
       setState(() => _isLoading = false);
-      print('Autocomplete error: $e');
-    }
-  }
-
-  Future<void> _onPlaceTapped(Map<String, Object> prediction) async {
-    // Search bar band karo
-    _controller.clear();
-    setState(() => _predictions = []);
-
-    // placeId se actual coordinates lo
-    final details = await _places.fetchPlace(
-      prediction['placeId'] as String,
-      fields: [PlaceField.Location], // sirf location chahiye
-    );
-
-    final location = details.place?.latLng;
-
-    if (location != null) {
-      // Parent ko coordinates do
-      widget.onPlaceSelected(maps.LatLng(location.lat, location.lng));
+      debugPrint('Autocomplete error: $e');
     }
   }
 

@@ -72,6 +72,14 @@ class _MapScreenState extends State<MapScreen> {
   // Navigation kab shuru hua
   DateTime? _navigationStartTime;
 
+  // Speed, distance, arrival
+  double _currentSpeedKmh = 0;
+  final double _remainingDistanceM = 0;
+  final String _arrivalTime = '';
+
+  // Map style
+  bool _isNightMode = false;
+
   final TtsService _tts = TtsService();
   @override
   void initState() {
@@ -89,6 +97,22 @@ class _MapScreenState extends State<MapScreen> {
     _compassSub?.cancel(); // Compass band karo jab screen close ho
     _mapController?.dispose();
     super.dispose();
+  }
+
+  // map_screen.dart mein yeh function add karo
+  Future<void> _applyMapStyle() async {
+    if (_mapController == null) return;
+
+    if (_isNightMode) {
+      // Night mode JSON load karo assets se
+      final style = await DefaultAssetBundle.of(
+        context,
+      ).loadString('assets/map_style_night.json');
+      _mapController!.setMapStyle(style);
+    } else {
+      // Normal mode — null dene se default style wapas aata hai
+      _mapController!.setMapStyle(null);
+    }
   }
 
   void _startCompass() {
@@ -196,8 +220,11 @@ class _MapScreenState extends State<MapScreen> {
     ).listen((position) {
       final newLocation = LatLng(position.latitude, position.longitude);
 
+      final speedKmh = (position.speed * 3.6).clamp(0.0, 300.0);
+
       setState(() {
         _currentLocation = newLocation;
+        _currentSpeedKmh = speedKmh;
         // Heading — car kis direction mein ja rahi hai
         if (position.speed > 0.5 && !position.heading.isNaN) {
           _heading = position.heading; // GPS se
@@ -211,13 +238,16 @@ class _MapScreenState extends State<MapScreen> {
 
       // Camera car ke saath move kare
       // Sirf tab jab route chal raha ho
+
+      print("full route is $_fullRoute");
+
       if (_fullRoute.isNotEmpty) {
         _mapController?.animateCamera(
           CameraUpdate.newCameraPosition(
             CameraPosition(
               target: newLocation,
-              zoom: 18,
-              tilt: 50, // 3D effect
+              zoom: 28,
+              tilt: 30, // 3D effect
               bearing: _heading, // map rotate karo direction ke saath
             ),
           ),
@@ -238,6 +268,46 @@ class _MapScreenState extends State<MapScreen> {
       if (d < minDist) {
         minDist = d;
         closestIndex = i;
+      }
+    }
+
+    double remaining = 0;
+    for (int i = closestIndex; i < _fullRoute.length - 1; i++) {
+      remaining += _haversineMeters(_fullRoute[i], _fullRoute[i + 1]);
+    }
+
+    // Arrival time calculate karo
+    String arrival = '';
+    if (_currentSpeedKmh > 5) {
+      // Speed se time nikalo
+      // remaining meters / (speed m/s) = seconds baaki
+      final speedMs = _currentSpeedKmh / 3.6;
+      final secondsLeft = remaining / speedMs;
+      final arrivalDateTime = DateTime.now().add(
+        Duration(seconds: secondsLeft.toInt()),
+      );
+
+      // Format karo — 11:45 PM
+      final hour = arrivalDateTime.hour;
+      final minute = arrivalDateTime.minute.toString().padLeft(2, '0');
+      final period = hour >= 12 ? 'PM' : 'AM';
+      final displayHour = hour % 12 == 0 ? 12 : hour % 12;
+      arrival = '$displayHour:$minute $period';
+    } else {
+      // Car ruki hui hai — ORS ki original duration use karo
+      if (_routeResult != null) {
+        final secondsLeft =
+            (_routeResult!.durationSeconds *
+                    (remaining / _routeResult!.distanceMeters))
+                .toInt();
+        final arrivalDateTime = DateTime.now().add(
+          Duration(seconds: secondsLeft),
+        );
+        final hour = arrivalDateTime.hour;
+        final minute = arrivalDateTime.minute.toString().padLeft(2, '0');
+        final period = hour >= 12 ? 'PM' : 'AM';
+        final displayHour = hour % 12 == 0 ? 12 : hour % 12;
+        arrival = '$displayHour:$minute $period';
       }
     }
 
@@ -403,336 +473,508 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   @override
-  @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          // ─── Layer 1: Google Map ───────────────────
-          GoogleMap(
-            initialCameraPosition: CameraPosition(
-              target: _currentLocation ?? _defaultLocation,
-              zoom: 15,
+      body: SafeArea(
+        child: Stack(
+          children: [
+            // ─── Layer 1: Google Map ───────────────────
+            GoogleMap(
+              initialCameraPosition: CameraPosition(
+                target: _currentLocation ?? _defaultLocation,
+                zoom: 15,
+              ),
+              onMapCreated: (controller) {
+                _mapController = controller;
+
+                // Jab map ready ho, location par jao
+                if (_currentLocation != null) {
+                  _mapController?.animateCamera(
+                    CameraUpdate.newLatLngZoom(_currentLocation!, 15),
+                  );
+                }
+                _applyMapStyle(); // map style apply karo jab map ready ho
+              },
+
+              // Map par tap karo — destination set ho
+              onTap: _onMapTapped,
+
+              // Polylines — route lines
+              polylines: _polylines,
+
+              // Markers — destination pin + car
+              markers: {
+                // Destination marker
+                ..._markers,
+
+                // Car marker — sirf tab dikhao jab location ho
+                if (_currentLocation != null && _isNavigating)
+                  Marker(
+                    markerId: const MarkerId('car'),
+                    position: _currentLocation!,
+                    rotation: _heading,
+                    flat: true,
+                    anchor: const Offset(0.5, 0.5),
+                    icon:
+                        _carIcon ??
+                        BitmapDescriptor.defaultMarkerWithHue(
+                          BitmapDescriptor.hueBlue,
+                        ),
+                  ),
+              },
+
+              myLocationButtonEnabled: false,
+              zoomControlsEnabled: true,
+              myLocationEnabled: _isNavigating ? false : true,
+              buildingsEnabled: true,
+              compassEnabled: true,
             ),
-            onMapCreated: (controller) {
-              _mapController = controller;
 
-              // Jab map ready ho, location par jao
-              if (_currentLocation != null) {
-                _mapController?.animateCamera(
-                  CameraUpdate.newLatLngZoom(_currentLocation!, 15),
-                );
-              }
-            },
+            // ─── Layer 2: Top instruction bar ─────────
+            // if (!_isNavigating)
+            //   Positioned(
+            //     top: 0,
+            //     left: 0,
+            //     right: 0,
+            //     child: SafeArea(
+            //       child: Container(
+            //         margin: const EdgeInsets.all(12),
+            //         padding: const EdgeInsets.symmetric(
+            //           horizontal: 16,
+            //           vertical: 12,
+            //         ),
+            //         decoration: BoxDecoration(
+            //           color: Colors.white,
+            //           borderRadius: BorderRadius.circular(12),
+            //           boxShadow: [
+            //             BoxShadow(
+            //               color: Colors.black.withOpacity(0.1),
+            //               blurRadius: 8,
+            //             ),
+            //           ],
+            //         ),
+            //         child: Row(
+            //           children: [
+            //             const Icon(
+            //               Icons.touch_app_rounded,
+            //               color: Color(0xFF4285F4),
+            //               size: 20,
+            //             ),
+            //             const SizedBox(width: 10),
+            //             Text(
+            //               _destination == null
+            //                   ? 'Tap on Map - Set destination'
+            //                   : 'Route Found',
+            //               style: const TextStyle(
+            //                 fontSize: 13,
+            //                 fontWeight: FontWeight.w500,
+            //               ),
+            //             ),
+            //           ],
+            //         ),
+            //       ),
+            //     ),
+            //   ),
 
-            // Map par tap karo — destination set ho
-            onTap: _onMapTapped,
+            // Navigation chal raha hai toh nav card dikhao
+            if (_isNavigating &&
+                _routeResult != null &&
+                _routeResult!.steps.isNotEmpty)
+              Positioned(
+                top: 0,
+                left: 0,
+                right: 0,
+                child: SafeArea(child: _buildNavCard()),
+              ),
 
-            // Polylines — route lines
-            polylines: _polylines,
-
-            // Markers — destination pin + car
-            markers: {
-              // Destination marker
-              ..._markers,
-
-              // Car marker — sirf tab dikhao jab location ho
-              if (_currentLocation != null)
-                Marker(
-                  markerId: const MarkerId('car'),
-                  position: _currentLocation!,
-                  rotation: _heading,
-                  flat: true,
-                  anchor: const Offset(0.5, 0.5),
-                  icon:
-                      _carIcon ??
-                      BitmapDescriptor.defaultMarkerWithHue(
-                        BitmapDescriptor.hueBlue,
-                      ),
+            // ─── Layer 3: Loading indicator ────────────
+            if (!_isNavigating)
+              Positioned(
+                top: 00,
+                left: 0,
+                right: 0,
+                child: SafeArea(
+                  child: PlacesSearch(
+                    onPlaceSelected: (latLng) {
+                      // Bilkul waise hi jaise tap se destination set hota tha
+                      _onMapTapped(latLng);
+                    },
+                  ),
                 ),
-            },
+              ),
+            if (_isLoading)
+              Container(
+                color: Colors.black.withOpacity(0.3),
+                child: const Center(
+                  child: Card(
+                    child: Padding(
+                      padding: EdgeInsets.all(20),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          CircularProgressIndicator(color: Color(0xFF4285F4)),
+                          SizedBox(height: 12),
+                          Text('Fetching Route'),
+                        ],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
 
-            myLocationButtonEnabled: true,
-            zoomControlsEnabled: true,
+            // custom button to test 3D view
+            // Positioned(
+            //   child: FloatingActionButton.small(
+            //     heroTag: 'test3d',
+            //     onPressed: _test3DView,
+            //     child: const Icon(Icons.threed_rotation),
+            //   ),
+            // ),
 
-            compassEnabled: true,
-          ),
+            // button to clear markers
+            if (_markers.isNotEmpty && !_isNavigating)
+              Positioned(
+                bottom: _routeResult != null ? 250 : 230,
+                left: 16,
+                child: FloatingActionButton.small(
+                  backgroundColor: Colors.red,
+                  child: Icon(Icons.clear),
+                  onPressed: () => setState(() => _markers.clear()),
+                ),
+              ),
 
-          // ─── Layer 2: Top instruction bar ─────────
-          if (!_isNavigating)
+            // custom relocation button
             Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
+              bottom: _routeResult != null ? 220 : 180,
+              left: 16,
+              child: FloatingActionButton.small(
+                backgroundColor:
+                    _isNightMode ? const Color(0xFF1A1A2E) : Colors.white,
+                onPressed: () async {
+                  Position pos = await Geolocator.getCurrentPosition();
+
+                  _mapController?.animateCamera(
+                    CameraUpdate.newCameraPosition(
+                      CameraPosition(
+                        target: LatLng(pos.latitude, pos.longitude),
+                        zoom: 17,
+                      ),
+                    ),
+                  );
+                },
+                child: Icon(Icons.my_location),
+              ),
+            ),
+            // Night mode toggle button
+            Positioned(
+              left: 16,
+              bottom: _routeResult != null ? 220 : 130,
+              child: FloatingActionButton.small(
+                heroTag: 'nightMode',
+                backgroundColor:
+                    _isNightMode ? const Color(0xFF1A1A2E) : Colors.white,
+                onPressed: () {
+                  setState(() => _isNightMode = !_isNightMode);
+                  _applyMapStyle();
+                },
+                child: Icon(
+                  _isNightMode
+                      ? Icons.wb_sunny_rounded
+                      : Icons.nightlight_round,
+                  color: _isNightMode ? Colors.yellow : Colors.indigo,
+                ),
+              ),
+            ),
+
+            // ─── Layer 4: Bottom info card ─────────────
+            // Sirf tab dikhao jab route aaya ho
+            if (_routeResult != null)
+              Positioned(
+                bottom: 0,
+                left: 0,
+                right: 0,
                 child: Container(
-                  margin: const EdgeInsets.all(12),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 12,
-                  ),
-                  decoration: BoxDecoration(
+                  decoration: const BoxDecoration(
                     color: Colors.white,
-                    borderRadius: BorderRadius.circular(12),
-                    boxShadow: [
-                      BoxShadow(
-                        color: Colors.black.withOpacity(0.1),
-                        blurRadius: 8,
-                      ),
-                    ],
+                    borderRadius: BorderRadius.vertical(
+                      top: Radius.circular(20),
+                    ),
                   ),
-                  child: Row(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(
-                        Icons.touch_app_rounded,
-                        color: Color(0xFF4285F4),
-                        size: 20,
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        _destination == null
-                            ? 'Tap on Map - Set destination'
-                            : 'Route Found',
-                        style: const TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w500,
+                      // Handle bar
+                      Container(
+                        width: 40,
+                        height: 4,
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade300,
+                          borderRadius: BorderRadius.circular(2),
                         ),
                       ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
+                      const SizedBox(height: 16),
 
-          // Navigation chal raha hai toh nav card dikhao
-          if (_isNavigating &&
-              _routeResult != null &&
-              _routeResult!.steps.isNotEmpty)
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(child: _buildNavCard()),
-            ),
+                      // Distance aur Duration row
+                      Row(
+                        children: [
+                          // Distance card
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFEFF6FF),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Column(
+                                children: [
+                                  const Icon(
+                                    Icons.route_rounded,
+                                    color: Color(0xFF4285F4),
+                                    size: 24,
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _routeResult!.distanceText,
+                                    style: const TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF1E3A8A),
+                                    ),
+                                  ),
+                                  const Text(
+                                    'Distance',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
 
-          // ─── Layer 3: Loading indicator ────────────
-          if (!_isNavigating)
-            Positioned(
-              top: 0,
-              left: 0,
-              right: 0,
-              child: SafeArea(
-                child: PlacesSearch(
-                  onPlaceSelected: (latLng) {
-                    // Bilkul waise hi jaise tap se destination set hota tha
-                    _onMapTapped(latLng);
-                  },
-                ),
-              ),
-            ),
-          if (_isLoading)
-            Container(
-              color: Colors.black.withOpacity(0.3),
-              child: const Center(
-                child: Card(
-                  child: Padding(
-                    padding: EdgeInsets.all(20),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        CircularProgressIndicator(color: Color(0xFF4285F4)),
-                        SizedBox(height: 12),
-                        Text('Fetching Route'),
-                      ],
-                    ),
-                  ),
-                ),
-              ),
-            ),
+                          const SizedBox(width: 12),
 
-          // ─── Layer 4: Bottom info card ─────────────
-          // Sirf tab dikhao jab route aaya ho
-          if (_routeResult != null)
-            Positioned(
-              bottom: 0,
-              left: 0,
-              right: 0,
-              child: Container(
-                decoration: const BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-                ),
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    // Handle bar
-                    Container(
-                      width: 40,
-                      height: 4,
-                      decoration: BoxDecoration(
-                        color: Colors.grey.shade300,
-                        borderRadius: BorderRadius.circular(2),
+                          // Duration card
+                          Expanded(
+                            child: Container(
+                              padding: const EdgeInsets.all(14),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFFF0FDF4),
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              child: Column(
+                                children: [
+                                  const Icon(
+                                    Icons.timer_rounded,
+                                    color: Color(0xFF16A34A),
+                                    size: 24,
+                                  ),
+                                  const SizedBox(height: 6),
+                                  Text(
+                                    _routeResult!.durationText,
+                                    style: const TextStyle(
+                                      fontSize: 18,
+                                      fontWeight: FontWeight.bold,
+                                      color: Color(0xFF14532D),
+                                    ),
+                                  ),
+                                  const Text(
+                                    'Duration',
+                                    style: TextStyle(
+                                      fontSize: 12,
+                                      color: Colors.grey,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
-                    ),
-                    const SizedBox(height: 16),
+                      const SizedBox(height: 12),
+                      // Navigation stats bar — sirf navigating mein dikhao
+                      if (_isNavigating)
+                        Container(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 12,
+                          ),
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF1A1A2E),
+                            borderRadius: BorderRadius.circular(14),
+                          ),
+                          child: Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              // Speed
+                              Column(
+                                children: [
+                                  Text(
+                                    _currentSpeedKmh.toStringAsFixed(0),
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const Text(
+                                    'km/h',
+                                    style: TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
 
-                    // Distance aur Duration row
-                    Row(
-                      children: [
-                        // Distance card
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFEFF6FF),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Column(
-                              children: [
-                                const Icon(
-                                  Icons.route_rounded,
-                                  color: Color(0xFF4285F4),
-                                  size: 24,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  _routeResult!.distanceText,
-                                  style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF1E3A8A),
+                              // Divider
+                              Container(
+                                width: 1,
+                                height: 36,
+                                color: Colors.white24,
+                              ),
+
+                              // Remaining distance
+                              Column(
+                                children: [
+                                  Text(
+                                    _remainingDistanceM >= 1000
+                                        ? (_remainingDistanceM / 1000)
+                                            .toStringAsFixed(1)
+                                        : '${_remainingDistanceM.toInt()}',
+                                    style: const TextStyle(
+                                      color: Colors.white,
+                                      fontSize: 24,
+                                      fontWeight: FontWeight.bold,
+                                    ),
                                   ),
-                                ),
-                                const Text(
-                                  'Distance',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
+                                  Text(
+                                    _remainingDistanceM >= 1000
+                                        ? 'km left'
+                                        : 'm left',
+                                    style: const TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11,
+                                    ),
                                   ),
-                                ),
-                              ],
-                            ),
+                                ],
+                              ),
+
+                              // Divider
+                              Container(
+                                width: 1,
+                                height: 36,
+                                color: Colors.white24,
+                              ),
+
+                              // Arrival time
+                              Column(
+                                children: [
+                                  Text(
+                                    _arrivalTime.isEmpty
+                                        ? '--:--'
+                                        : _arrivalTime,
+                                    style: const TextStyle(
+                                      color: Color(0xFF4FC3F7),
+                                      fontSize: 20,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                  const Text(
+                                    'arrival',
+                                    style: TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 11,
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ],
                           ),
                         ),
 
-                        const SizedBox(width: 12),
-
-                        // Duration card
-                        Expanded(
-                          child: Container(
-                            padding: const EdgeInsets.all(14),
-                            decoration: BoxDecoration(
-                              color: const Color(0xFFF0FDF4),
-                              borderRadius: BorderRadius.circular(12),
-                            ),
-                            child: Column(
-                              children: [
-                                const Icon(
-                                  Icons.timer_rounded,
-                                  color: Color(0xFF16A34A),
-                                  size: 24,
-                                ),
-                                const SizedBox(height: 6),
-                                Text(
-                                  _routeResult!.durationText,
-                                  style: const TextStyle(
-                                    fontSize: 18,
-                                    fontWeight: FontWeight.bold,
-                                    color: Color(0xFF14532D),
-                                  ),
-                                ),
-                                const Text(
-                                  'Duration',
-                                  style: TextStyle(
-                                    fontSize: 12,
-                                    color: Colors.grey,
-                                  ),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-
-                    const SizedBox(height: 12),
-                    // "Route clear karo" button ke UPAR yeh add karo:
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            _startNavigation = !_startNavigation;
-                            _currentStepIndex =
-                                0; // navigation start hone par step index reset karo
-                            _isNavigating = _startNavigation;
-                          });
-                          if (_startNavigation) {
-                            _startLiveTracking();
-                            _navigationStartTime = DateTime.now();
-                            if (_routeResult!.steps.isNotEmpty) {
-                              _tts.speak(_routeResult!.steps[0].instruction);
+                      const SizedBox(height: 12),
+                      // "Route clear karo" button ke UPAR yeh add karo:
+                      SizedBox(
+                        width: double.infinity,
+                        child: ElevatedButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _startNavigation = !_startNavigation;
+                              _currentStepIndex =
+                                  0; // navigation start hone par step index reset karo
+                              _isNavigating = _startNavigation;
+                            });
+                            if (_startNavigation) {
+                              _startLiveTracking();
+                              _navigationStartTime = DateTime.now();
+                              if (_routeResult!.steps.isNotEmpty) {
+                                _tts.speak(_routeResult!.steps[0].instruction);
+                              }
+                            } else {
+                              _getRoute(_currentLocation!, _destination!);
+                              _navigationStartTime = null;
                             }
-                          } else {
-                            _getRoute(_currentLocation!, _destination!);
-                            _navigationStartTime = null;
-                          }
-                          ScaffoldMessenger.of(context).showSnackBar(
-                            const SnackBar(
-                              content: Text('Navigation shuru ho gaya!'),
-                              backgroundColor: Colors.green,
-                              duration: Duration(seconds: 2),
-                            ),
-                          );
-                        },
-                        icon: const Icon(Icons.navigation_rounded),
-                        label:
-                            _startNavigation
-                                ? const Text('Stop Navigation')
-                                : const Text('Start Navigation'),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF4285F4),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 14),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                        ),
-                      ),
-                    ),
-                    const SizedBox(
-                      height: 8,
-                    ), // thoda gap "Route clear" se pehle
-                    // Route clear karne ka button
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: () {
-                          setState(() {
-                            _destination = null;
-                            _markers = {};
-                            _polylines = {};
-                            _fullRoute = [];
-                            _routeResult = null;
-
-                            _mapController?.animateCamera(
-                              CameraUpdate.newLatLngZoom(
-                                _currentLocation ?? _defaultLocation,
-                                15,
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(
+                                content: Text('Navigation shuru ho gaya!'),
+                                backgroundColor: Colors.green,
+                                duration: Duration(seconds: 2),
                               ),
                             );
-                          });
-                        },
-                        icon: const Icon(Icons.close_rounded),
-                        label: const Text('Route clear karo'),
+                          },
+                          icon: const Icon(Icons.navigation_rounded),
+                          label:
+                              _startNavigation
+                                  ? const Text('Stop Navigation')
+                                  : const Text('Start Navigation'),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF4285F4),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 14),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                          ),
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(
+                        height: 8,
+                      ), // thoda gap "Route clear" se pehle
+                      // Route clear karne ka button
+                      SizedBox(
+                        width: double.infinity,
+                        child: OutlinedButton.icon(
+                          onPressed: () {
+                            setState(() {
+                              _destination = null;
+                              _markers = {};
+                              _polylines = {};
+                              _fullRoute = [];
+                              _routeResult = null;
+                              _isNavigating = false;
+
+                              _mapController?.animateCamera(
+                                CameraUpdate.newLatLngZoom(
+                                  _currentLocation ?? _defaultLocation,
+                                  15,
+                                ),
+                              );
+                            });
+                          },
+                          icon: const Icon(Icons.close_rounded),
+                          label: const Text('Route clear karo'),
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
-            ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -838,6 +1080,20 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ),
         ],
+      ),
+    );
+  }
+
+  void _test3DView() {
+    _mapController?.animateCamera(
+      CameraUpdate.newCameraPosition(
+        const CameraPosition(
+          // Lahore — DHA Phase 5
+          target: LatLng(40.7580, -73.9855),
+          zoom: 19,
+          tilt: 60,
+          bearing: 45,
+        ),
       ),
     );
   }

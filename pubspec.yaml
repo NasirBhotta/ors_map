@@ -15,6 +15,7 @@ dependencies:
   geolocator: ^14.0.2
   google_maps_flutter: ^2.14.0
   http: ^1.6.0
+  mapbox_maps_flutter: ^2.25.0
 
 dev_dependencies:
   flutter_test:
@@ -26,4 +27,6 @@ dev_dependencies:
 flutter:
   assets:
     - assets/car_icon.png
+    - assets/map_style_night.json
+    - assets/lowpoly_car.glb
   uses-material-design: true

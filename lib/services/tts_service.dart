@@ -1,7 +1,7 @@
 import 'package:flutter_tts/flutter_tts.dart';
 
 class TtsService {
-  // Singleton — puri app mein ek hi instance
+  // Singleton
   static final TtsService _instance = TtsService._internal();
   factory TtsService() => _instance;
   TtsService._internal();
@@ -11,24 +11,25 @@ class TtsService {
 
   Future<void> init() async {
     if (_isInitialized) return;
+
+    // Pehle available engines dekho — phir set karo
     final engines = await _tts.getEngines;
-    print('Available TTS Engines: $engines');
+    if (engines.contains('com.google.android.tts')) {
+      await _tts.setEngine('com.google.android.tts');
+    }
+
     await _tts.setLanguage('en-US');
-    await _tts.setSpeechRate(0.5); // thodi slow — navigation ke liye better
+    await _tts.setSpeechRate(0.5);
     await _tts.setVolume(1.0);
     await _tts.setPitch(1.0);
-    await _tts.setEngine('com.google.android.tts'); // ← ADD KARO
     _isInitialized = true;
   }
 
-  // Yeh main function hai — instruction bolega
   Future<void> speak(String text) async {
     await init();
-    await _tts.stop(); // pehle jo chal raha ho band karo
-    await _tts.speak(text); // phir naya bolao
+    await _tts.stop();
+    await _tts.speak(text);
   }
 
-  Future<void> stop() async {
-    await _tts.stop();
-  }
+  Future<void> stop() async => _tts.stop();
 }

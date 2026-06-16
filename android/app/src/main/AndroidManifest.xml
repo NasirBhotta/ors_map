@@ -9,10 +9,12 @@
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <!-- Google Maps API Key -->
-            <meta-data
+        <meta-data
             android:name="com.google.android.geo.API_KEY"
-            android:value="AIzaSyDokWAEammXOAyow94XdZ-CC1N6u_mCJ1k"
-        />
+            android:value="${GOOGLE_MAPS_API_KEY}" />
+        <meta-data
+            android:name="MAPBOX_ACCESS_TOKEN"
+            android:value="${MAPBOX_ACCESS_TOKEN}" />
         <activity
             android:name=".MainActivity"
             android:exported="true"
