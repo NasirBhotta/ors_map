@@ -26,8 +26,15 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const String _carModelSourceId = 'navigation-car-model-source';
   static const String _carModelLayerId = 'navigation-car-model-layer';
   static const String _carModelUri = 'asset://assets/lowpoly_car.glb';
-  static const double _carModelBearingOffset = 90.0;
-  static const double _carModelScale = 3.0;
+  static const double _carModelBearingOffset = 180.0;
+  static const double _carModelScale = 2.0;
+  static const Color _accentBlue = Color(0xFF2563EB);
+  static const Color _successGreen = Color(0xFF16A34A);
+  static const Color _warningAmber = Color(0xFFFACC15);
+  static const Color _ink = Color(0xFF0F172A);
+  static const Color _mutedInk = Color(0xFF64748B);
+  static const Color _panelBorder = Color(0xFFE2E8F0);
+  static const double _panelRadius = 8.0;
 
   mapbox.MapboxMap? _mapboxMap;
   mapbox.Position? _currentPosition;
@@ -40,8 +47,13 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   bool _isFollowingCamera = true;
   String _currentInstruction = '';
   double _currentSpeedKmh = 0.0;
+  int? _currentSpeedLimit;
+  List<MapboxStep> _upcomingSteps = [];
+  bool _isNavCardExpanded = false;
   DateTime? _estimatedArrival;
   String _remainingDistanceText = '--';
+  bool _ttsEnabled = true;
+  bool _showingRouteOverview = false;
 
   mapbox.PointAnnotationManager? _annotationManager;
   mapbox.PointAnnotation? _destinationMarker;
@@ -138,9 +150,23 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             child: _buildCompassButton(),
           ),
 
-          if (_isNavigating && !_isFollowingCamera)
+          if (_isNavigating)
             Positioned(
               top: MediaQuery.of(context).padding.top + 162,
+              right: 16,
+              child: _buildTtsButton(),
+            ),
+
+          if (_isNavigating)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 228,
+              right: 16,
+              child: _buildRouteOverviewButton(),
+            ),
+
+          if (_isNavigating && !_isFollowingCamera)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 294,
               right: 16,
               child: _buildRecenterButton(),
             ),
@@ -160,6 +186,9 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
               right: 16,
               child: _buildBottomBar(),
             ),
+
+          if (_isNavigating)
+            Positioned(bottom: 130, left: 16, child: _buildSpeedLimitSign()),
 
           if (_activeRoute != null && !_isNavigating)
             Positioned(
@@ -203,6 +232,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       if (!mounted) return;
       setState(() => _compassHeading = (heading + 360) % 360);
     });
+  }
+
+  void _safeSpeak(String text) {
+    if (_ttsEnabled) _tts.speak(text);
   }
 
   void _onSearchChanged(String query) {
@@ -346,6 +379,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
   void _handleNavigationMapGesture(mapbox.MapContentGestureContext context) {
     if (!_isNavigating) return;
+    if (_showingRouteOverview) return;
 
     _navService?.setFollowModeEnabled(false);
     _recenterTimer?.cancel();
@@ -374,7 +408,54 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       mapbox.MapAnimationOptions(duration: 550),
     );
 
-    if (mounted) setState(() => _isFollowingCamera = true);
+    if (mounted) {
+      setState(() {
+        _isFollowingCamera = true;
+        _showingRouteOverview = false;
+      });
+    }
+  }
+
+  Future<void> _toggleRouteOverview() async {
+    final route = _activeRoute;
+    final current = _currentPosition;
+    final dest = _activeDestination;
+    final map = _mapboxMap;
+    if (route == null || current == null || dest == null || map == null) return;
+
+    _recenterTimer?.cancel();
+    _recenterTimer = null;
+
+    if (!_showingRouteOverview) {
+      _navService?.setFollowModeEnabled(false);
+      final drawing = MapboxDrawingService(mapboxMap: map);
+      await drawing.fitRouteBounds(
+        fromLng: current.lng.toDouble(),
+        fromLat: current.lat.toDouble(),
+        toLng: dest.lng.toDouble(),
+        toLat: dest.lat.toDouble(),
+      );
+      if (!mounted) return;
+      setState(() {
+        _showingRouteOverview = true;
+        _isFollowingCamera = false;
+      });
+    } else {
+      _navService?.setFollowModeEnabled(true);
+      await map.flyTo(
+        _navigationCamera(
+          lat: current.lat.toDouble(),
+          lng: current.lng.toDouble(),
+          bearing: _mapBearing,
+        ),
+        mapbox.MapAnimationOptions(duration: 800),
+      );
+      if (!mounted) return;
+      setState(() {
+        _showingRouteOverview = false;
+        _isFollowingCamera = true;
+      });
+    }
   }
 
   Future<void> _buildRouteToDestination(mapbox.Position destination) async {
@@ -431,7 +512,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       _activeDestination = null;
       _currentInstruction = '';
       _currentSpeedKmh = 0.0;
+      _currentSpeedLimit = null;
+      _upcomingSteps = [];
+      _isNavCardExpanded = false;
       _remainingDistanceText = '--';
+      _showingRouteOverview = false;
     });
   }
 
@@ -445,13 +530,15 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _recenterTimer = null;
 
     if (route.steps.isNotEmpty) {
-      _tts.speak(route.steps.first.instruction);
+      _safeSpeak(route.steps.first.instruction);
     }
 
-    await _setupNavigationCarPuck();
-
+    final initialBearing = _initialRouteBearing(route);
     if (_currentPosition != null) {
-      final initialBearing = _initialRouteBearing(route);
+      await _setupNavigationCarModel(
+        position: _currentPosition!,
+        bearing: initialBearing,
+      );
       await map.flyTo(
         _navigationCamera(
           lat: _currentPosition!.lat.toDouble(),
@@ -468,22 +555,32 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       mapboxMap: map,
       compassHeadingProvider: () => _compassHeading,
       onLocationUpdate: (position, speedKmh, bearing) {
+        final current = mapbox.Position(position.longitude, position.latitude);
+        unawaited(
+          _updateNavigationCarModel(position: current, bearing: bearing),
+        );
         setState(() {
-          _currentPosition = mapbox.Position(
-            position.longitude,
-            position.latitude,
-          );
+          _currentPosition = current;
           _currentSpeedKmh = speedKmh;
           _mapBearing = bearing;
         });
       },
       onStepChanged: (index, step) {
-        setState(() => _currentInstruction = step.instruction);
-        _tts.speak(step.instruction);
+        setState(() {
+          _currentInstruction = step.instruction;
+          _currentSpeedLimit = step.speedLimitKmh;
+          final route = _activeRoute;
+          if (route != null) {
+            final remaining = route.steps.length - index;
+            final count = remaining.clamp(0, 3).toInt();
+            _upcomingSteps = route.steps.sublist(index, index + count);
+          }
+        });
+        _safeSpeak(step.instruction);
       },
       onReroute: (msg) {
         setState(() => _currentInstruction = msg);
-        _tts.speak('Rerouting, please wait');
+        _safeSpeak('Rerouting, please wait');
       },
       onRouteChanged: (newRoute) async {
         final drawing = MapboxDrawingService(mapboxMap: map);
@@ -514,7 +611,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         });
       },
       onDestinationReached: () async {
-        _tts.speak('You have reached your destination!');
+        _safeSpeak('You have reached your destination!');
         _recenterTimer?.cancel();
         _recenterTimer = null;
         await _clearAll();
@@ -524,17 +621,29 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           setState(() {
             _isNavigating = false;
             _isFollowingCamera = true;
+            _currentSpeedLimit = null;
+            _upcomingSteps = [];
+            _isNavCardExpanded = false;
+            _showingRouteOverview = false;
+            _ttsEnabled = true;
           });
         }
       },
     );
 
     _navService!.setFollowModeEnabled(true);
+    if (_activeRoute != null && _activeRoute!.steps.isNotEmpty) {
+      _upcomingSteps = _activeRoute!.steps.take(3).toList();
+    }
     _navService!.startNavigation(route: route, destination: destination);
 
     setState(() {
       _isNavigating = true;
       _isFollowingCamera = true;
+      _showingRouteOverview = false;
+      _currentSpeedLimit =
+          route.steps.isNotEmpty ? route.steps.first.speedLimitKmh : null;
+      _upcomingSteps = route.steps.take(3).toList();
       _currentInstruction =
           route.steps.isNotEmpty ? route.steps.first.instruction : 'Continue';
       _remainingDistanceText = route.distanceText;
@@ -553,6 +662,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     setState(() {
       _isNavigating = false;
       _isFollowingCamera = true;
+      _currentSpeedLimit = null;
+      _upcomingSteps = [];
+      _isNavCardExpanded = false;
+      _showingRouteOverview = false;
+      _ttsEnabled = true;
     });
   }
 
@@ -599,26 +713,75 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     );
   }
 
-  Future<void> _setupNavigationCarPuck() async {
-    await _mapboxMap?.location.updateSettings(
-      mapbox.LocationComponentSettings(
-        enabled: true,
-        puckBearingEnabled: true,
-        puckBearing: mapbox.PuckBearing.COURSE,
-        locationPuck: mapbox.LocationPuck(
-          locationPuck3D: mapbox.LocationPuck3D(
-            modelUri: _carModelUri,
-            modelScale: const [_carModelScale, _carModelScale, _carModelScale],
-            modelRotation: const [0.0, 0.0, _carModelBearingOffset],
-            modelScaleMode: mapbox.ModelScaleMode.MAP,
-            modelCastShadows: true,
-            modelReceiveShadows: true,
-            modelEmissiveStrength: 0.7,
-            modelOpacity: 1.0,
-          ),
-        ),
+  Future<void> _setupNavigationCarModel({
+    required mapbox.Position position,
+    required double bearing,
+  }) async {
+    final map = _mapboxMap;
+    if (map == null) return;
+
+    await map.location.updateSettings(
+      mapbox.LocationComponentSettings(enabled: false),
+    );
+
+    await _removeCarModelLayer();
+
+    await map.style.addSource(
+      mapbox.GeoJsonSource(
+        id: _carModelSourceId,
+        data: _carPointGeoJson(position),
       ),
     );
+
+    final layer = mapbox.ModelLayer(
+      id: _carModelLayerId,
+      sourceId: _carModelSourceId,
+      modelId: _carModelUri,
+      modelScale: const [_carModelScale, _carModelScale, _carModelScale],
+      modelRotation: [0.0, 0.0, _carModelRotation(bearing)],
+      modelType: mapbox.ModelType.COMMON_3D,
+      modelCastShadows: true,
+      modelReceiveShadows: true,
+      modelEmissiveStrength: 0.7,
+      modelOpacity: 1.0,
+    );
+    await map.style.addLayer(layer);
+  }
+
+  Future<void> _updateNavigationCarModel({
+    required mapbox.Position position,
+    required double bearing,
+  }) async {
+    final map = _mapboxMap;
+    if (map == null || !_isNavigating) return;
+
+    try {
+      final source =
+          await map.style.getSource(_carModelSourceId) as mapbox.GeoJsonSource;
+      await source.updateGeoJSON(_carPointGeoJson(position));
+      await map.style.setStyleLayerProperty(
+        _carModelLayerId,
+        'model-rotation',
+        [0.0, 0.0, _carModelRotation(bearing)],
+      );
+    } catch (_) {
+      await _setupNavigationCarModel(position: position, bearing: bearing);
+    }
+  }
+
+  double _carModelRotation(double bearing) {
+    return (bearing + _carModelBearingOffset + 360.0) % 360.0;
+  }
+
+  String _carPointGeoJson(mapbox.Position position) {
+    return jsonEncode({
+      'type': 'Feature',
+      'geometry': {
+        'type': 'Point',
+        'coordinates': [position.lng, position.lat],
+      },
+      'properties': {},
+    });
   }
 
   void _startLocationUpdates() async {
@@ -717,15 +880,53 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     return bytes!.buffer.asUint8List();
   }
 
+  BoxDecoration _panelDecoration({
+    Color color = Colors.white,
+    Color borderColor = _panelBorder,
+    double shadowAlpha = 0.14,
+  }) {
+    return BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(_panelRadius),
+      border: Border.all(color: borderColor),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: shadowAlpha),
+          blurRadius: 22,
+          offset: const Offset(0, 10),
+        ),
+      ],
+    );
+  }
+
+  Widget _frostedPanel({
+    required Widget child,
+    Color color = Colors.white,
+    Color borderColor = _panelBorder,
+    double shadowAlpha = 0.14,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(_panelRadius),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        child: DecoratedBox(
+          decoration: _panelDecoration(
+            color: color,
+            borderColor: borderColor,
+            shadowAlpha: shadowAlpha,
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
   Widget _buildSearchPanel() {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Material(
-          elevation: 8,
-          shadowColor: Colors.black.withValues(alpha: 0.18),
-          borderRadius: BorderRadius.circular(14),
-          color: Colors.white,
+        _frostedPanel(
+          color: Colors.white.withValues(alpha: 0.94),
           child: TextField(
             controller: _searchController,
             focusNode: _searchFocusNode,
@@ -740,7 +941,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             },
             decoration: InputDecoration(
               hintText: 'Search destination',
-              prefixIcon: const Icon(Icons.search_rounded),
+              hintStyle: const TextStyle(
+                color: _mutedInk,
+                fontWeight: FontWeight.w500,
+              ),
+              prefixIcon: const Icon(Icons.search_rounded, color: _ink),
               suffixIcon:
                   _isSearching
                       ? const Padding(
@@ -755,78 +960,108 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
                       ? IconButton(
                         onPressed: _clearSearch,
                         icon: const Icon(Icons.close_rounded),
+                        color: _mutedInk,
                       )
                       : IconButton(
                         onPressed: _moveCameraToCurrentLocation,
                         icon: const Icon(Icons.my_location_rounded),
+                        color: _accentBlue,
                       ),
               border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
               contentPadding: const EdgeInsets.symmetric(
                 horizontal: 16,
-                vertical: 15,
+                vertical: 16,
               ),
+            ),
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
             ),
           ),
         ),
         if (_searchResults.isNotEmpty || _searchError != null)
-          Container(
-            margin: const EdgeInsets.only(top: 8),
-            constraints: const BoxConstraints(maxHeight: 320),
-            decoration: BoxDecoration(
-              color: Colors.white,
-              borderRadius: BorderRadius.circular(14),
-              boxShadow: [
-                BoxShadow(
-                  color: Colors.black.withValues(alpha: 0.16),
-                  blurRadius: 16,
-                  offset: const Offset(0, 8),
-                ),
-              ],
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: _frostedPanel(
+              color: Colors.white.withValues(alpha: 0.96),
+              shadowAlpha: 0.12,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child:
+                    _searchResults.isNotEmpty
+                        ? ListView.separated(
+                          padding: EdgeInsets.zero,
+                          shrinkWrap: true,
+                          itemCount: _searchResults.length,
+                          separatorBuilder:
+                              (_, __) => Divider(
+                                height: 1,
+                                color: _panelBorder.withValues(alpha: 0.8),
+                              ),
+                          itemBuilder: (context, index) {
+                            final place = _searchResults[index];
+                            return ListTile(
+                              minVerticalPadding: 12,
+                              leading: Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: _accentBlue.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Icon(
+                                  Icons.place_rounded,
+                                  color: _accentBlue,
+                                  size: 20,
+                                ),
+                              ),
+                              title: Text(
+                                place.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: _ink,
+                                  fontWeight: FontWeight.w700,
+                                ),
+                              ),
+                              subtitle: Text(
+                                place.subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(color: _mutedInk),
+                              ),
+                              onTap: () => _selectSearchPlace(place),
+                            );
+                          },
+                        )
+                        : Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.info_outline_rounded,
+                                size: 20,
+                                color: _mutedInk,
+                              ),
+                              const SizedBox(width: 10),
+                              Expanded(
+                                child: Text(
+                                  _searchError!,
+                                  style: const TextStyle(
+                                    color: _ink,
+                                    fontSize: 14,
+                                    fontWeight: FontWeight.w600,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+              ),
             ),
-            child:
-                _searchResults.isNotEmpty
-                    ? ListView.separated(
-                      padding: EdgeInsets.zero,
-                      shrinkWrap: true,
-                      itemCount: _searchResults.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
-                      itemBuilder: (context, index) {
-                        final place = _searchResults[index];
-                        return ListTile(
-                          dense: true,
-                          leading: const Icon(
-                            Icons.place_rounded,
-                            color: Color(0xFF2563EB),
-                          ),
-                          title: Text(
-                            place.title,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          subtitle: Text(
-                            place.subtitle,
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                          onTap: () => _selectSearchPlace(place),
-                        );
-                      },
-                    )
-                    : Padding(
-                      padding: const EdgeInsets.all(16),
-                      child: Row(
-                        children: [
-                          const Icon(Icons.info_outline_rounded, size: 20),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              _searchError!,
-                              style: const TextStyle(fontSize: 14),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
           ),
       ],
     );
@@ -836,63 +1071,123 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final headingText =
         _compassHeading == null ? '--' : '${_compassHeading!.round()}';
 
-    return Material(
-      elevation: 7,
-      color: Colors.white,
-      shape: const CircleBorder(),
-      child: InkWell(
-        customBorder: const CircleBorder(),
-        onTap: _resetNorth,
-        child: SizedBox(
-          width: 54,
-          height: 54,
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              Transform.rotate(
-                angle: -_mapBearing * pi / 180,
-                child: const Icon(
-                  Icons.navigation_rounded,
-                  color: Colors.red,
-                  size: 28,
-                ),
-              ),
-              Positioned(
-                bottom: 6,
-                child: Text(
-                  headingText,
-                  style: const TextStyle(
-                    color: Colors.black54,
-                    fontSize: 10,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-              ),
-            ],
+    return _roundMapButton(
+      onTap: _resetNorth,
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Transform.rotate(
+            angle: -_mapBearing * pi / 180,
+            child: const Icon(
+              Icons.navigation_rounded,
+              color: Color(0xFFEF4444),
+              size: 28,
+            ),
           ),
-        ),
+          Positioned(
+            bottom: 6,
+            child: Text(
+              headingText,
+              style: const TextStyle(
+                color: _mutedInk,
+                fontSize: 10,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildRecenterButton() {
-    return Material(
-      elevation: 7,
-      color: Colors.white,
-      shape: const CircleBorder(),
+  Widget _roundMapButton({
+    required VoidCallback onTap,
+    required Widget child,
+    String? tooltip,
+  }) {
+    final button = Material(
+      elevation: 8,
+      shadowColor: Colors.black.withValues(alpha: 0.16),
+      color: Colors.white.withValues(alpha: 0.96),
+      shape: const CircleBorder(side: BorderSide(color: _panelBorder)),
       child: InkWell(
         customBorder: const CircleBorder(),
-        onTap: _recenterNavigation,
-        child: const Tooltip(
-          message: 'Recenter',
-          child: SizedBox(
-            width: 54,
-            height: 54,
-            child: Icon(
-              Icons.my_location_rounded,
-              color: Color(0xFF2563EB),
-              size: 26,
-            ),
+        onTap: onTap,
+        child: SizedBox(width: 54, height: 54, child: child),
+      ),
+    );
+
+    if (tooltip == null) return button;
+    return Tooltip(message: tooltip, child: button);
+  }
+
+  Widget _buildRecenterButton() {
+    return _roundMapButton(
+      onTap: _recenterNavigation,
+      tooltip: 'Recenter',
+      child: const Icon(
+        Icons.my_location_rounded,
+        color: _accentBlue,
+        size: 26,
+      ),
+    );
+  }
+
+  Widget _buildTtsButton() {
+    return _roundMapButton(
+      onTap: () => setState(() => _ttsEnabled = !_ttsEnabled),
+      tooltip: _ttsEnabled ? 'Mute voice guidance' : 'Enable voice guidance',
+      child: Icon(
+        _ttsEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded,
+        color: _ttsEnabled ? _accentBlue : _mutedInk,
+        size: 26,
+      ),
+    );
+  }
+
+  Widget _buildRouteOverviewButton() {
+    return _roundMapButton(
+      onTap: _toggleRouteOverview,
+      tooltip: _showingRouteOverview ? 'Follow route' : 'Route overview',
+      child: Icon(
+        _showingRouteOverview ? Icons.navigation_rounded : Icons.route_rounded,
+        color: _accentBlue,
+        size: 26,
+      ),
+    );
+  }
+
+  Widget _buildSpeedLimitSign() {
+    if (_currentSpeedLimit == null || !_isNavigating) {
+      return const SizedBox.shrink();
+    }
+
+    final isOverLimit = _currentSpeedKmh > _currentSpeedLimit!;
+    return Container(
+      width: 64,
+      height: 64,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: Colors.white,
+        border: Border.all(
+          color: isOverLimit ? Colors.orange : Colors.red,
+          width: 4,
+        ),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.2),
+            blurRadius: 8,
+            offset: const Offset(0, 3),
+          ),
+        ],
+      ),
+      child: Center(
+        child: Text(
+          '$_currentSpeedLimit',
+          style: const TextStyle(
+            fontSize: 20,
+            fontWeight: FontWeight.w900,
+            color: Colors.black,
           ),
         ),
       ),
@@ -900,30 +1195,115 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }
 
   Widget _buildNavCard() {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-      decoration: BoxDecoration(
-        color: Colors.black87,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
+    final canExpand = _upcomingSteps.length > 1;
+
+    return _frostedPanel(
+      color: const Color(0xFF0F172A).withValues(alpha: 0.92),
+      borderColor: Colors.white.withValues(alpha: 0.1),
+      shadowAlpha: 0.22,
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          const Icon(Icons.navigation, color: Colors.yellow, size: 28),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Text(
-              _currentInstruction,
-              style: const TextStyle(
-                color: Colors.white,
-                fontSize: 15,
-                fontWeight: FontWeight.w600,
+          InkWell(
+            onTap:
+                canExpand
+                    ? () =>
+                        setState(() => _isNavCardExpanded = !_isNavCardExpanded)
+                    : null,
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
+              child: Row(
+                children: [
+                  Container(
+                    width: 42,
+                    height: 42,
+                    decoration: BoxDecoration(
+                      color: _warningAmber.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.navigation_rounded,
+                      color: _warningAmber,
+                      size: 24,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      _currentInstruction,
+                      maxLines: _isNavCardExpanded ? 2 : 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 15,
+                        height: 1.24,
+                        fontWeight: FontWeight.w700,
+                      ),
+                    ),
+                  ),
+                  if (canExpand) ...[
+                    const SizedBox(width: 6),
+                    Icon(
+                      _isNavCardExpanded
+                          ? Icons.keyboard_arrow_up_rounded
+                          : Icons.keyboard_arrow_down_rounded,
+                      color: Colors.white.withValues(alpha: 0.64),
+                      size: 24,
+                    ),
+                  ],
+                  const SizedBox(width: 4),
+                  IconButton(
+                    onPressed: _stopNavigation,
+                    icon: const Icon(Icons.close_rounded),
+                    color: Colors.white70,
+                    tooltip: 'Stop',
+                  ),
+                ],
               ),
             ),
           ),
-          GestureDetector(
-            onTap: _stopNavigation,
-            child: const Icon(Icons.close, color: Colors.red),
-          ),
+          if (_isNavCardExpanded && canExpand) ...[
+            Divider(height: 1, color: Colors.white.withValues(alpha: 0.1)),
+            ..._upcomingSteps
+                .skip(1)
+                .take(2)
+                .map(
+                  (step) => Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 7, 12, 7),
+                    child: Row(
+                      children: [
+                        Icon(
+                          Icons.turn_slight_right_rounded,
+                          color: Colors.white.withValues(alpha: 0.5),
+                          size: 18,
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: Text(
+                            step.instruction,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.65),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w500,
+                            ),
+                          ),
+                        ),
+                        Text(
+                          step.distance >= 1000
+                              ? '${(step.distance / 1000).toStringAsFixed(1)} km'
+                              : '${step.distance.round()} m',
+                          style: TextStyle(
+                            color: Colors.white.withValues(alpha: 0.5),
+                            fontSize: 11,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+          ],
         ],
       ),
     );
@@ -939,55 +1319,150 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       arrivalText = '$hour12:$m $amPm';
     }
 
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
-      decoration: BoxDecoration(
-        color: Colors.black87,
-        borderRadius: BorderRadius.circular(16),
-      ),
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceAround,
-        children: [
-          _barItem('${_currentSpeedKmh.toInt()}', 'km/h', Colors.white),
-          Container(height: 40, width: 1, color: Colors.grey),
-          _barItem(arrivalText, 'Arrival', Colors.yellow),
-          Container(height: 40, width: 1, color: Colors.grey),
-          _barItem(_remainingDistanceText, 'Left', Colors.white),
-        ],
+    return _frostedPanel(
+      color: const Color(0xFF0B1220).withValues(alpha: 0.94),
+      borderColor: Colors.white.withValues(alpha: 0.08),
+      shadowAlpha: 0.22,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        child: Row(
+          children: [
+            Expanded(
+              child: _barItem(
+                '${_currentSpeedKmh.toInt()}',
+                'km/h',
+                Colors.white,
+                Icons.speed_rounded,
+              ),
+            ),
+            _barDivider(),
+            Expanded(
+              child: _barItem(
+                arrivalText,
+                'Arrival',
+                _warningAmber,
+                Icons.schedule_rounded,
+              ),
+            ),
+            _barDivider(),
+            Expanded(
+              child: _barItem(
+                _remainingDistanceText,
+                'Left',
+                Colors.white,
+                Icons.route_rounded,
+              ),
+            ),
+          ],
+        ),
       ),
     );
   }
 
-  Widget _barItem(String value, String label, Color valueColor) {
+  Widget _barDivider() {
+    return Container(
+      width: 1,
+      height: 44,
+      margin: const EdgeInsets.symmetric(horizontal: 8),
+      color: Colors.white.withValues(alpha: 0.12),
+    );
+  }
+
+  Widget _barItem(String value, String label, Color valueColor, IconData icon) {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Text(
-          value,
-          style: TextStyle(
-            color: valueColor,
-            fontSize: 22,
-            fontWeight: FontWeight.bold,
+        Icon(icon, color: Colors.white.withValues(alpha: 0.56), size: 17),
+        const SizedBox(height: 4),
+        FittedBox(
+          fit: BoxFit.scaleDown,
+          child: Text(
+            value,
+            maxLines: 1,
+            style: TextStyle(
+              color: valueColor,
+              fontSize: 20,
+              fontWeight: FontWeight.w800,
+            ),
           ),
         ),
-        Text(label, style: const TextStyle(color: Colors.grey, fontSize: 12)),
+        const SizedBox(height: 2),
+        Text(
+          label,
+          style: TextStyle(
+            color: Colors.white.withValues(alpha: 0.58),
+            fontSize: 11,
+            fontWeight: FontWeight.w600,
+          ),
+        ),
       ],
     );
   }
 
   Widget _buildStartButton() {
-    return ElevatedButton.icon(
-      onPressed: () async => _startNavigation(),
-      icon: const Icon(Icons.navigation),
-      label: Text(
-        'Start - ${_activeRoute?.durationText ?? ''}',
-        style: const TextStyle(fontSize: 16),
-      ),
-      style: ElevatedButton.styleFrom(
-        backgroundColor: Colors.green,
-        foregroundColor: Colors.white,
-        minimumSize: const Size(double.infinity, 54),
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+    return _frostedPanel(
+      color: Colors.white.withValues(alpha: 0.96),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Material(
+          color: _successGreen,
+          borderRadius: BorderRadius.circular(_panelRadius),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(_panelRadius),
+            onTap: () async => _startNavigation(),
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.navigation_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          'Start navigation',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        if ((_activeRoute?.durationText ?? '').isNotEmpty)
+                          Text(
+                            _activeRoute!.durationText,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.76),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const Icon(
+                    Icons.arrow_forward_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
       ),
     );
   }

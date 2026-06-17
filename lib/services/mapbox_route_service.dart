@@ -9,17 +9,28 @@ class MapboxStep {
   final double distance; // meters
   final double duration; // seconds
   final List<double>? maneuverLocation; // [lng, lat]
+  final int? speedLimitKmh;
 
   MapboxStep({
     required this.instruction,
     required this.distance,
     required this.duration,
     this.maneuverLocation,
+    this.speedLimitKmh,
   });
 
   factory MapboxStep.fromJson(Map<String, dynamic> json) {
     final maneuver = json['maneuver'] as Map<String, dynamic>?;
     final location = maneuver?['location'];
+    final maxSpeed = json['max_speed'] as Map<String, dynamic>?;
+    int? speedKmh;
+    if (maxSpeed != null) {
+      final speed = (maxSpeed['speed'] as num?)?.toInt();
+      final unit = maxSpeed['unit'] as String?;
+      if (speed != null) {
+        speedKmh = unit == 'mph' ? (speed * 1.60934).round() : speed;
+      }
+    }
 
     return MapboxStep(
       instruction: maneuver?['instruction'] ?? '',
@@ -32,6 +43,7 @@ class MapboxStep {
                 (location[1] as num).toDouble(),
               ]
               : null,
+      speedLimitKmh: speedKmh,
     );
   }
 }
@@ -82,7 +94,7 @@ class MapboxRouteService {
       '?access_token=$token'
       '&geometries=geojson'
       '&steps=true'
-      '&overview=full',
+      '&overview=full&annotations=maxspeed',
     );
 
     try {

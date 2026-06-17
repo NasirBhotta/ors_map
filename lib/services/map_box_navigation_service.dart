@@ -160,7 +160,7 @@ class MapboxNavigationService {
   ) async {
     if (!_followModeEnabled) return;
 
-    await mapboxMap.flyTo(
+    await mapboxMap.easeTo(
       mapbox.CameraOptions(
         center: mapbox.Point(
           coordinates: mapbox.Position(position.longitude, position.latitude),
@@ -170,7 +170,7 @@ class MapboxNavigationService {
         bearing: bearing,
         padding: mapbox.MbxEdgeInsets(top: 80, left: 0, bottom: 300, right: 0),
       ),
-      mapbox.MapAnimationOptions(duration: 550),
+      mapbox.MapAnimationOptions(duration: 400),
     );
   }
 
@@ -306,9 +306,16 @@ class MapboxNavigationService {
   }
 
   double _resolveBearing(geolocator.Position position, _RouteSnap? snap) {
+    if (snap != null) {
+      _lastBearing = snap.segmentBearing;
+      return snap.segmentBearing;
+    }
+
     final gpsHeading = position.heading;
     if (position.speed > 1.0 && gpsHeading >= 0 && gpsHeading <= 360) {
       _lastBearing = gpsHeading;
+
+      print('GPS heading: $gpsHeading, speed: ${position.speed}');
       return gpsHeading;
     }
 
@@ -329,11 +336,6 @@ class MapboxNavigationService {
         );
         return _lastBearing;
       }
-    }
-
-    if (snap != null) {
-      _lastBearing = snap.segmentBearing;
-      return snap.segmentBearing;
     }
 
     final compassHeading = compassHeadingProvider?.call();
