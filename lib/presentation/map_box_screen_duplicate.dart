@@ -54,10 +54,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   String _remainingDistanceText = '--';
   bool _ttsEnabled = true;
   bool _showingRouteOverview = false;
-
   mapbox.PointAnnotationManager? _annotationManager;
   mapbox.PointAnnotation? _destinationMarker;
-
+  static const double _carLngOffset = 0.000000;
+  static const double _carLatOffset = 0.000009;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   Timer? _searchDebounce;
@@ -95,109 +95,132 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: Stack(
-        children: [
-          mapbox.MapWidget(
-            key: const ValueKey('mapWidget'),
-            styleUri: mapbox.MapboxStyles.STANDARD,
-            onScrollListener: _handleNavigationMapGesture,
-            onZoomListener: _handleNavigationMapGesture,
-            onStyleLoadedListener: (_) async {
-              await _configureMapStyle();
-              await _setupLocationPuck();
-              _startLocationUpdates();
-            },
-            onMapCreated: (controller) async {
-              _mapboxMap = controller;
-              _annotationManager =
-                  await controller.annotations.createPointAnnotationManager();
+      body: SafeArea(
+        child: Stack(
+          children: [
+            mapbox.MapWidget(
+              key: const ValueKey('mapWidget'),
+              styleUri: mapbox.MapboxStyles.STANDARD,
+              onScrollListener: _handleNavigationMapGesture,
+              onZoomListener: _handleNavigationMapGesture,
+              mapOptions: mapbox.MapOptions(
+                pixelRatio: MediaQuery.of(context).devicePixelRatio,
+              ),
+              onStyleLoadedListener: (_) async {
+                await _configureMapStyle();
+                await _setupLocationPuck();
+                _startLocationUpdates();
+              },
+              onMapCreated: (controller) async {
+                _mapboxMap = controller;
+                _annotationManager =
+                    await controller.annotations.createPointAnnotationManager();
 
-              await _mapboxMap!.setCamera(
-                mapbox.CameraOptions(
-                  center: mapbox.Point(
-                    coordinates: mapbox.Position(73.0551, 33.7215),
+                await _mapboxMap!.setCamera(
+                  mapbox.CameraOptions(
+                    center: mapbox.Point(
+                      coordinates: mapbox.Position(73.0551, 33.7215),
+                    ),
+                    zoom: 17.0,
+                    pitch: 60.0,
+                    bearing: 45.0,
                   ),
-                  zoom: 17.0,
-                  pitch: 60.0,
-                  bearing: 45.0,
-                ),
-              );
-              if (mounted) setState(() => _mapBearing = 45.0);
+                );
 
-              _mapboxMap!.addInteraction(
-                mapbox.TapInteraction.onMap((context) async {
-                  if (_currentPosition == null) return;
-                  if (_isNavigating) _stopNavigation();
+                _mapboxMap!.compass.updateSettings(
+                  mapbox.CompassSettings(enabled: false),
+                );
 
-                  final tapped = context.point.coordinates;
-                  await _buildRouteToDestination(tapped);
-                }),
-              );
-            },
-          ),
+                _mapboxMap!.scaleBar.updateSettings(
+                  mapbox.ScaleBarSettings(enabled: false),
+                );
 
-          if (!_isNavigating)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 12,
-              left: 16,
-              right: 16,
-              child: _buildSearchPanel(),
+                _mapboxMap!.logo.updateSettings(
+                  mapbox.LogoSettings(enabled: false),
+                );
+
+                _mapboxMap!.attribution.updateSettings(
+                  mapbox.AttributionSettings(enabled: false),
+                );
+                if (mounted) setState(() => _mapBearing = 45.0);
+
+                _mapboxMap!.addInteraction(
+                  mapbox.TapInteraction.onMap((context) async {
+                    if (_currentPosition == null) return;
+                    if (_isNavigating) _stopNavigation();
+
+                    final tapped = context.point.coordinates;
+                    await _buildRouteToDestination(tapped);
+                  }),
+                );
+              },
             ),
 
-          Positioned(
-            top: MediaQuery.of(context).padding.top + (_isNavigating ? 96 : 98),
-            right: 16,
-            child: _buildCompassButton(),
-          ),
+            if (!_isNavigating)
+              Positioned(
+                top: 10,
+                left: 16,
+                right: 16,
+                child: _buildSearchPanel(),
+              ),
 
-          if (_isNavigating)
             Positioned(
-              top: MediaQuery.of(context).padding.top + 162,
+              top:
+                  MediaQuery.of(context).padding.top +
+                  (_isNavigating ? 96 : 98),
               right: 16,
-              child: _buildTtsButton(),
+              child: _buildCompassButton(),
             ),
 
-          if (_isNavigating)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 228,
-              right: 16,
-              child: _buildRouteOverviewButton(),
-            ),
+            if (_isNavigating)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 162,
+                right: 16,
+                child: _buildTtsButton(),
+              ),
 
-          if (_isNavigating && !_isFollowingCamera)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 294,
-              right: 16,
-              child: _buildRecenterButton(),
-            ),
+            if (_isNavigating)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 228,
+                right: 16,
+                child: _buildRouteOverviewButton(),
+              ),
 
-          if (_isNavigating && _currentInstruction.isNotEmpty)
-            Positioned(
-              top: MediaQuery.of(context).padding.top + 12,
-              left: 16,
-              right: 16,
-              child: _buildNavCard(),
-            ),
+            if (_isNavigating && !_isFollowingCamera)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 294,
+                right: 16,
+                child: _buildRecenterButton(),
+              ),
 
-          if (_isNavigating)
-            Positioned(
-              bottom: 40,
-              left: 16,
-              right: 16,
-              child: _buildBottomBar(),
-            ),
+            if (_isNavigating && _currentInstruction.isNotEmpty)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 12,
+                left: 16,
+                right: 16,
+                child: _buildNavCard(),
+              ),
 
-          if (_isNavigating)
-            Positioned(bottom: 130, left: 16, child: _buildSpeedLimitSign()),
+            if (_isNavigating)
+              Positioned(
+                bottom: 40,
+                left: 16,
+                right: 16,
+                child: _buildBottomBar(),
+              ),
 
-          if (_activeRoute != null && !_isNavigating)
-            Positioned(
-              bottom: 40,
-              left: 16,
-              right: 16,
-              child: _buildStartButton(),
-            ),
-        ],
+            if (_isNavigating)
+              Positioned(bottom: 130, left: 16, child: _buildSpeedLimitSign()),
+
+            if (_activeRoute != null && !_isNavigating)
+              Positioned(
+                bottom: 40,
+                left: 16,
+                right: 16,
+                child: _buildStartButton(),
+              ),
+          ],
+        ),
       ),
     );
   }
@@ -222,6 +245,12 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           entry.value,
         );
       } catch (_) {}
+    }
+
+    final layers = await style.getStyleLayers();
+    for (final layer in layers) {
+      print("layers are ${layer!.type} and id is ${layer.id}");
+      debugPrint(layer.id);
     }
   }
 
@@ -677,8 +706,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }) {
     return mapbox.CameraOptions(
       center: mapbox.Point(coordinates: mapbox.Position(lng, lat)),
-      zoom: 18.7,
-      pitch: 72.0,
+      zoom: 20,
+      pitch: 75.0,
       bearing: bearing,
       padding: mapbox.MbxEdgeInsets(top: 80, left: 0, bottom: 300, right: 0),
     );
@@ -778,7 +807,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       'type': 'Feature',
       'geometry': {
         'type': 'Point',
-        'coordinates': [position.lng, position.lat],
+        'coordinates': [
+          position.lng + _carLngOffset,
+          position.lat + _carLatOffset,
+        ],
       },
       'properties': {},
     });
