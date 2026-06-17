@@ -27,7 +27,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const String _carModelLayerId = 'navigation-car-model-layer';
   static const String _carModelUri = 'asset://assets/lowpoly_car.glb';
   static const double _carModelBearingOffset = 90.0;
-  static const double _carModelScale = 80.0;
+  static const double _carModelScale = 5.0;
 
   mapbox.MapboxMap? _mapboxMap;
   mapbox.Position? _currentPosition;
@@ -543,7 +543,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             modelUri: _carModelUri,
             modelScale: const [_carModelScale, _carModelScale, _carModelScale],
             modelRotation: const [0.0, 0.0, _carModelBearingOffset],
-            modelScaleMode: mapbox.ModelScaleMode.VIEWPORT,
+            modelScaleMode: mapbox.ModelScaleMode.MAP,
             modelCastShadows: true,
             modelReceiveShadows: true,
             modelEmissiveStrength: 0.7,
@@ -585,8 +585,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     geolocator.Geolocator.getPositionStream(
       locationSettings: const geolocator.LocationSettings(
-        accuracy: geolocator.LocationAccuracy.high,
-        distanceFilter: 5,
+        accuracy: geolocator.LocationAccuracy.bestForNavigation,
+        distanceFilter: 1,
       ),
     ).listen((position) {
       _currentPosition = mapbox.Position(position.longitude, position.latitude);
