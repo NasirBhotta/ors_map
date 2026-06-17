@@ -538,13 +538,12 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         enabled: true,
         puckBearingEnabled: true,
         puckBearing: mapbox.PuckBearing.COURSE,
-        slot: 'top',
         locationPuck: mapbox.LocationPuck(
           locationPuck3D: mapbox.LocationPuck3D(
             modelUri: _carModelUri,
             modelScale: const [_carModelScale, _carModelScale, _carModelScale],
             modelRotation: const [0.0, 0.0, _carModelBearingOffset],
-            modelScaleMode: mapbox.ModelScaleMode.MAP,
+            modelScaleMode: mapbox.ModelScaleMode.VIEWPORT,
             modelCastShadows: true,
             modelReceiveShadows: true,
             modelEmissiveStrength: 0.7,
