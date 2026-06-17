@@ -27,7 +27,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const String _carModelLayerId = 'navigation-car-model-layer';
   static const String _carModelUri = 'asset://assets/lowpoly_car.glb';
   static const double _carModelBearingOffset = 90.0;
-  static const double _carModelScale = 5.0;
+  static const double _carModelScale = 3.0;
 
   mapbox.MapboxMap? _mapboxMap;
   mapbox.Position? _currentPosition;
@@ -37,6 +37,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
   MapboxNavigationService? _navService;
   bool _isNavigating = false;
+  bool _isFollowingCamera = true;
   String _currentInstruction = '';
   double _currentSpeedKmh = 0.0;
   DateTime? _estimatedArrival;
@@ -52,6 +53,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   bool _isSearching = false;
   String? _searchError;
   int _searchRequestId = 0;
+  Timer? _recenterTimer;
 
   StreamSubscription<CompassEvent>? _compassSub;
   double? _compassHeading;
@@ -69,6 +71,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   @override
   void dispose() {
     _searchDebounce?.cancel();
+    _recenterTimer?.cancel();
     _searchController.dispose();
     _searchFocusNode.dispose();
     _compassSub?.cancel();
@@ -85,6 +88,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           mapbox.MapWidget(
             key: const ValueKey('mapWidget'),
             styleUri: mapbox.MapboxStyles.STANDARD,
+            onScrollListener: _handleNavigationMapGesture,
+            onZoomListener: _handleNavigationMapGesture,
             onStyleLoadedListener: (_) async {
               await _configureMapStyle();
               await _setupLocationPuck();
@@ -132,6 +137,13 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             right: 16,
             child: _buildCompassButton(),
           ),
+
+          if (_isNavigating && !_isFollowingCamera)
+            Positioned(
+              top: MediaQuery.of(context).padding.top + 162,
+              right: 16,
+              child: _buildRecenterButton(),
+            ),
 
           if (_isNavigating && _currentInstruction.isNotEmpty)
             Positioned(
@@ -332,6 +344,39 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     );
   }
 
+  void _handleNavigationMapGesture(mapbox.MapContentGestureContext context) {
+    if (!_isNavigating) return;
+
+    _navService?.setFollowModeEnabled(false);
+    _recenterTimer?.cancel();
+    _recenterTimer = Timer(const Duration(seconds: 4), _recenterNavigation);
+
+    if (_isFollowingCamera && mounted) {
+      setState(() => _isFollowingCamera = false);
+    }
+  }
+
+  Future<void> _recenterNavigation() async {
+    _recenterTimer?.cancel();
+    _recenterTimer = null;
+
+    final current = _currentPosition;
+    final map = _mapboxMap;
+    if (!_isNavigating || current == null || map == null) return;
+
+    _navService?.setFollowModeEnabled(true);
+    await map.flyTo(
+      _navigationCamera(
+        lat: current.lat.toDouble(),
+        lng: current.lng.toDouble(),
+        bearing: _mapBearing,
+      ),
+      mapbox.MapAnimationOptions(duration: 550),
+    );
+
+    if (mounted) setState(() => _isFollowingCamera = true);
+  }
+
   Future<void> _buildRouteToDestination(mapbox.Position destination) async {
     final current = _currentPosition;
     final map = _mapboxMap;
@@ -396,6 +441,9 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final map = _mapboxMap;
     if (route == null || destination == null || map == null) return;
 
+    _recenterTimer?.cancel();
+    _recenterTimer = null;
+
     if (route.steps.isNotEmpty) {
       _tts.speak(route.steps.first.instruction);
     }
@@ -421,6 +469,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       compassHeadingProvider: () => _compassHeading,
       onLocationUpdate: (position, speedKmh, bearing) {
         setState(() {
+          _currentPosition = mapbox.Position(
+            position.longitude,
+            position.latitude,
+          );
           _currentSpeedKmh = speedKmh;
           _mapBearing = bearing;
         });
@@ -463,17 +515,26 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       },
       onDestinationReached: () async {
         _tts.speak('You have reached your destination!');
+        _recenterTimer?.cancel();
+        _recenterTimer = null;
         await _clearAll();
         await _setupLocationPuck();
         _resetCameraToCurrentLocation();
-        if (mounted) setState(() => _isNavigating = false);
+        if (mounted) {
+          setState(() {
+            _isNavigating = false;
+            _isFollowingCamera = true;
+          });
+        }
       },
     );
 
+    _navService!.setFollowModeEnabled(true);
     _navService!.startNavigation(route: route, destination: destination);
 
     setState(() {
       _isNavigating = true;
+      _isFollowingCamera = true;
       _currentInstruction =
           route.steps.isNotEmpty ? route.steps.first.instruction : 'Continue';
       _remainingDistanceText = route.distanceText;
@@ -481,12 +542,18 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }
 
   void _stopNavigation() {
+    _recenterTimer?.cancel();
+    _recenterTimer = null;
+    _navService?.setFollowModeEnabled(true);
     _navService?.stopNavigation();
     _tts.stop();
     _setupLocationPuck();
     _resetCameraToCurrentLocation();
     _clearAll();
-    setState(() => _isNavigating = false);
+    setState(() {
+      _isNavigating = false;
+      _isFollowingCamera = true;
+    });
   }
 
   mapbox.CameraOptions _navigationCamera({
@@ -802,6 +869,30 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
                 ),
               ),
             ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecenterButton() {
+    return Material(
+      elevation: 7,
+      color: Colors.white,
+      shape: const CircleBorder(),
+      child: InkWell(
+        customBorder: const CircleBorder(),
+        onTap: _recenterNavigation,
+        child: const Tooltip(
+          message: 'Recenter',
+          child: SizedBox(
+            width: 54,
+            height: 54,
+            child: Icon(
+              Icons.my_location_rounded,
+              color: Color(0xFF2563EB),
+              size: 26,
+            ),
           ),
         ),
       ),

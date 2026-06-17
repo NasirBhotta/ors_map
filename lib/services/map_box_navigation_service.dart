@@ -22,11 +22,13 @@ class MapboxNavigationService {
   double _lastRouteDistanceMeters = 0;
   double _lastBearing = 0;
   bool _isRerouting = false;
+  bool _followModeEnabled = true;
   DateTime? _startTime;
   geolocator.Position? _lastPosition;
 
   static const _offRouteMeters = 80.0;
   static const _stepAdvanceMeters = 35.0;
+  static const _lookAheadMeters = 25.0;
 
   final double? Function()? compassHeadingProvider;
 
@@ -89,8 +91,13 @@ class MapboxNavigationService {
     _lastRouteDistanceMeters = 0;
     _lastBearing = 0;
     _isRerouting = false;
+    _followModeEnabled = true;
     _startTime = null;
     _lastPosition = null;
+  }
+
+  void setFollowModeEnabled(bool enabled) {
+    _followModeEnabled = enabled;
   }
 
   void _setRoute(MapboxRouteResult route) {
@@ -151,6 +158,8 @@ class MapboxNavigationService {
     geolocator.Position position,
     double bearing,
   ) async {
+    if (!_followModeEnabled) return;
+
     await mapboxMap.flyTo(
       mapbox.CameraOptions(
         center: mapbox.Point(
@@ -303,12 +312,6 @@ class MapboxNavigationService {
       return gpsHeading;
     }
 
-    final compassHeading = compassHeadingProvider?.call();
-    if (compassHeading != null && !compassHeading.isNaN) {
-      _lastBearing = (compassHeading + 360) % 360;
-      return _lastBearing;
-    }
-
     final previous = _lastPosition;
     if (previous != null) {
       final moved = _haversine(
@@ -331,6 +334,12 @@ class MapboxNavigationService {
     if (snap != null) {
       _lastBearing = snap.segmentBearing;
       return snap.segmentBearing;
+    }
+
+    final compassHeading = compassHeadingProvider?.call();
+    if (compassHeading != null && !compassHeading.isNaN) {
+      _lastBearing = (compassHeading + 360) % 360;
+      return _lastBearing;
     }
 
     return _lastBearing;
@@ -394,7 +403,12 @@ class MapboxNavigationService {
         bestAlongRoute =
             (_routeDistanceAtIndex.isNotEmpty ? _routeDistanceAtIndex[i] : 0) +
             segmentDistance * clampedT;
-        bestBearing = _bearingBetween(a[1], a[0], b[1], b[0]);
+        bestBearing = _lookAheadBearing(
+          fromLat: position.latitude,
+          fromLng: position.longitude,
+          coords: coords,
+          startIndex: bestIndex,
+        );
       }
     }
 
@@ -404,6 +418,48 @@ class MapboxNavigationService {
       distanceAlongRouteMeters: bestAlongRoute,
       segmentBearing: bestBearing,
     );
+  }
+
+  double _lookAheadBearing({
+    required double fromLat,
+    required double fromLng,
+    required List<List<double>> coords,
+    required int startIndex,
+    double lookAheadMeters = _lookAheadMeters,
+  }) {
+    if (coords.isEmpty) return _lastBearing;
+
+    var remaining = lookAheadMeters;
+    var currentIndex = startIndex.clamp(0, coords.length - 1).toInt();
+
+    while (currentIndex < coords.length - 1) {
+      final current = coords[currentIndex];
+      final next = coords[currentIndex + 1];
+      final segmentLength = _haversine(
+        current[1],
+        current[0],
+        next[1],
+        next[0],
+      );
+
+      if (segmentLength > 0 && remaining <= segmentLength) {
+        final fraction = remaining / segmentLength;
+        final interpolatedLng = current[0] + (next[0] - current[0]) * fraction;
+        final interpolatedLat = current[1] + (next[1] - current[1]) * fraction;
+        return _bearingBetween(
+          fromLat,
+          fromLng,
+          interpolatedLat,
+          interpolatedLng,
+        );
+      }
+
+      remaining -= segmentLength;
+      currentIndex++;
+    }
+
+    final last = coords.last;
+    return _bearingBetween(fromLat, fromLng, last[1], last[0]);
   }
 
   double _bearingBetween(double lat1, double lng1, double lat2, double lng2) {
