@@ -21,14 +21,18 @@ class MapboxNavigationService {
   int _offRouteCount = 0;
   double _lastRouteDistanceMeters = 0;
   double _lastBearing = 0;
+  bool _hasBearing = false;
   bool _isRerouting = false;
   bool _followModeEnabled = true;
   DateTime? _startTime;
   geolocator.Position? _lastPosition;
+  mapbox.Position? _lastVisualPosition;
 
   static const _offRouteMeters = 80.0;
   static const _stepAdvanceMeters = 35.0;
-  static const _lookAheadMeters = 25.0;
+  static const _lookAheadMeters = 45.0;
+  static const _maxBackwardSnapMeters = 25.0;
+  static const _minForwardSnapWindowMeters = 90.0;
 
   final double? Function()? compassHeadingProvider;
 
@@ -36,6 +40,7 @@ class MapboxNavigationService {
     geolocator.Position position,
     double speedKmh,
     double bearing,
+    mapbox.Position visualPosition,
   )?
   onLocationUpdate;
   final void Function(int stepIndex, MapboxStep step)? onStepChanged;
@@ -73,7 +78,7 @@ class MapboxNavigationService {
     _gpsSub = geolocator.Geolocator.getPositionStream(
       locationSettings: const geolocator.LocationSettings(
         accuracy: geolocator.LocationAccuracy.bestForNavigation,
-        distanceFilter: 2,
+        distanceFilter: 1,
       ),
     ).listen(_onLocationUpdate);
   }
@@ -90,10 +95,12 @@ class MapboxNavigationService {
     _offRouteCount = 0;
     _lastRouteDistanceMeters = 0;
     _lastBearing = 0;
+    _hasBearing = false;
     _isRerouting = false;
     _followModeEnabled = true;
     _startTime = null;
     _lastPosition = null;
+    _lastVisualPosition = null;
   }
 
   void setFollowModeEnabled(bool enabled) {
@@ -140,31 +147,36 @@ class MapboxNavigationService {
 
   void _onLocationUpdate(geolocator.Position position) {
     final route = _route;
-    final snap = route == null ? null : _findNearestRoutePoint(position, route);
+    final rawSnap =
+        route == null ? null : _findNearestRoutePoint(position, route);
+
+    // Pehle forward-correction apply karo, PHIR bearing nikalo
+    final snap = rawSnap == null ? null : _keepProgressForward(rawSnap);
     final bearing = _resolveBearing(position, snap);
+    final visualPosition = _resolveVisualPosition(position, snap);
+
     final speedKmh = (position.speed * 3.6).clamp(0.0, 300.0);
 
-    onLocationUpdate?.call(position, speedKmh, bearing);
-    _updateCamera(position, bearing);
+    onLocationUpdate?.call(position, speedKmh, bearing, visualPosition);
+    _updateCamera(visualPosition, bearing);
 
     if (route != null && snap != null) {
-      _checkProgress(position, route, snap);
+      _checkProgress(
+        position,
+        route,
+        snap,
+      ); // ab yeh already-corrected snap milega
     }
 
     _lastPosition = position;
   }
 
-  Future<void> _updateCamera(
-    geolocator.Position position,
-    double bearing,
-  ) async {
+  Future<void> _updateCamera(mapbox.Position position, double bearing) async {
     if (!_followModeEnabled) return;
 
-    await mapboxMap.easeTo(
+    await mapboxMap.flyTo(
       mapbox.CameraOptions(
-        center: mapbox.Point(
-          coordinates: mapbox.Position(position.longitude, position.latitude),
-        ),
+        center: mapbox.Point(coordinates: position),
         zoom: 18.7,
         pitch: 72.0,
         bearing: bearing,
@@ -194,14 +206,13 @@ class MapboxNavigationService {
     }
 
     _offRouteCount = 0;
-    final effectiveSnap = _keepProgressForward(snap);
+    // final effectiveSnap = _keepProgressForward(snap);
 
     final routeLength =
         _routeDistanceAtIndex.isNotEmpty
             ? _routeDistanceAtIndex.last
             : route.distanceMeters;
-    final remainingDistance = (routeLength -
-            effectiveSnap.distanceAlongRouteMeters)
+    final remainingDistance = (routeLength - snap.distanceAlongRouteMeters)
         .clamp(0.0, route.distanceMeters);
     final remainingDuration =
         route.durationSeconds *
@@ -209,22 +220,27 @@ class MapboxNavigationService {
 
     await onRouteProgress?.call(
       route,
-      effectiveSnap.closestRouteIndex,
+      snap.closestRouteIndex,
       remainingDistance,
       remainingDuration,
     );
 
-    _checkStepAdvance(position, route, effectiveSnap);
+    _checkStepAdvance(position, route, snap);
     _checkDestination(position);
   }
 
   _RouteSnap _keepProgressForward(_RouteSnap snap) {
     if (snap.distanceAlongRouteMeters + 25 < _lastRouteDistanceMeters) {
+      final lastAcceptedCoord = _coordinateAtRouteDistance(
+        _lastRouteDistanceMeters,
+      );
       return _RouteSnap(
         closestRouteIndex: _lastRouteIndex,
         distanceMeters: snap.distanceMeters,
         distanceAlongRouteMeters: _lastRouteDistanceMeters,
         segmentBearing: _lastBearing,
+        snappedLng: lastAcceptedCoord?[0] ?? snap.snappedLng,
+        snappedLat: lastAcceptedCoord?[1] ?? snap.snappedLat,
       );
     }
 
@@ -307,16 +323,12 @@ class MapboxNavigationService {
 
   double _resolveBearing(geolocator.Position position, _RouteSnap? snap) {
     if (snap != null) {
-      _lastBearing = snap.segmentBearing;
-      return snap.segmentBearing;
+      return _acceptBearing(snap.segmentBearing);
     }
 
     final gpsHeading = position.heading;
     if (position.speed > 1.0 && gpsHeading >= 0 && gpsHeading <= 360) {
-      _lastBearing = gpsHeading;
-
-      print('GPS heading: $gpsHeading, speed: ${position.speed}');
-      return gpsHeading;
+      return _acceptBearing(gpsHeading);
     }
 
     final previous = _lastPosition;
@@ -328,22 +340,75 @@ class MapboxNavigationService {
         position.longitude,
       );
       if (moved > 3) {
-        _lastBearing = _bearingBetween(
-          previous.latitude,
-          previous.longitude,
-          position.latitude,
-          position.longitude,
+        return _acceptBearing(
+          _bearingBetween(
+            previous.latitude,
+            previous.longitude,
+            position.latitude,
+            position.longitude,
+          ),
         );
-        return _lastBearing;
       }
     }
 
     final compassHeading = compassHeadingProvider?.call();
     if (compassHeading != null && !compassHeading.isNaN) {
-      _lastBearing = (compassHeading + 360) % 360;
+      return _acceptBearing((compassHeading + 360) % 360);
+    }
+
+    return _lastBearing;
+  }
+
+  mapbox.Position _resolveVisualPosition(
+    geolocator.Position position,
+    _RouteSnap? snap,
+  ) {
+    final target =
+        snap != null &&
+                snap.distanceMeters <=
+                    max(_offRouteMeters, position.accuracy * 2.5)
+            ? mapbox.Position(snap.snappedLng, snap.snappedLat)
+            : mapbox.Position(position.longitude, position.latitude);
+    final previous = _lastVisualPosition;
+    if (previous == null) {
+      _lastVisualPosition = target;
+      return target;
+    }
+
+    final distance = _haversine(
+      previous.lat.toDouble(),
+      previous.lng.toDouble(),
+      target.lat.toDouble(),
+      target.lng.toDouble(),
+    );
+    if (distance > 60) {
+      _lastVisualPosition = target;
+      return target;
+    }
+
+    final factor = position.speed > 2.0 ? 0.45 : 0.3;
+    final smoothed = mapbox.Position(
+      previous.lng.toDouble() +
+          (target.lng.toDouble() - previous.lng.toDouble()) * factor,
+      previous.lat.toDouble() +
+          (target.lat.toDouble() - previous.lat.toDouble()) * factor,
+    );
+    _lastVisualPosition = smoothed;
+    return smoothed;
+  }
+
+  double _acceptBearing(double targetBearing) {
+    final normalizedTarget = _normalizeBearing(targetBearing);
+    if (!_hasBearing) {
+      _hasBearing = true;
+      _lastBearing = normalizedTarget;
       return _lastBearing;
     }
 
+    final delta = _shortestBearingDelta(_lastBearing, normalizedTarget);
+    final maxStep = delta.abs() > 120 ? 18.0 : 32.0;
+    final smoothedDelta = (delta * 0.28).clamp(-maxStep, maxStep).toDouble();
+    _lastBearing = _normalizeBearing(_lastBearing + smoothedDelta);
     return _lastBearing;
   }
 
@@ -358,6 +423,8 @@ class MapboxNavigationService {
         distanceMeters: double.infinity,
         distanceAlongRouteMeters: 0,
         segmentBearing: _lastBearing,
+        snappedLng: coords.isEmpty ? position.longitude : coords.first[0],
+        snappedLat: coords.isEmpty ? position.latitude : coords.first[1],
       );
     }
 
@@ -367,6 +434,18 @@ class MapboxNavigationService {
     var bestIndex = 0;
     var bestAlongRoute = 0.0;
     var bestBearing = _lastBearing;
+    var bestSnappedLng = coords.first[0];
+    var bestSnappedLat = coords.first[1];
+    var fallbackDistance = double.infinity;
+    var fallbackIndex = 0;
+    var fallbackAlongRoute = 0.0;
+    var fallbackBearing = _lastBearing;
+    var fallbackSnappedLng = coords.first[0];
+    var fallbackSnappedLat = coords.first[1];
+    final forwardWindowMeters = max(
+      _minForwardSnapWindowMeters,
+      position.speed * 8 + position.accuracy * 2,
+    );
 
     for (var i = 0; i < coords.length - 1; i++) {
       final a = coords[i];
@@ -400,18 +479,49 @@ class MapboxNavigationService {
             i + 1 < _routeDistanceAtIndex.length
                 ? _routeDistanceAtIndex[i + 1] - _routeDistanceAtIndex[i]
                 : _haversine(a[1], a[0], b[1], b[0]);
-        bestDistance = distance;
-        bestIndex = clampedT >= 0.5 ? i + 1 : i;
-        bestAlongRoute =
+        final distanceAlongRoute =
             (_routeDistanceAtIndex.isNotEmpty ? _routeDistanceAtIndex[i] : 0) +
             segmentDistance * clampedT;
-        bestBearing = _lookAheadBearing(
-          fromLat: position.latitude,
-          fromLng: position.longitude,
+        final snappedLng = a[0] + (b[0] - a[0]) * clampedT;
+        final snappedLat = a[1] + (b[1] - a[1]) * clampedT;
+        final routeBearing = _routeBearingAtDistance(
           coords: coords,
-          startIndex: bestIndex,
+          distanceAlongRouteMeters: distanceAlongRoute,
         );
+
+        if (distance < fallbackDistance) {
+          fallbackDistance = distance;
+          fallbackIndex = clampedT >= 0.5 ? i + 1 : i;
+          fallbackAlongRoute = distanceAlongRoute;
+          fallbackSnappedLng = snappedLng;
+          fallbackSnappedLat = snappedLat;
+          fallbackBearing = routeBearing;
+        }
+
+        if (_lastRouteDistanceMeters > 0 &&
+            (distanceAlongRoute <
+                    _lastRouteDistanceMeters - _maxBackwardSnapMeters ||
+                distanceAlongRoute >
+                    _lastRouteDistanceMeters + forwardWindowMeters)) {
+          continue;
+        }
+
+        bestDistance = distance;
+        bestIndex = clampedT >= 0.5 ? i + 1 : i;
+        bestAlongRoute = distanceAlongRoute;
+        bestSnappedLng = snappedLng;
+        bestSnappedLat = snappedLat;
+        bestBearing = routeBearing;
       }
+    }
+
+    if (bestDistance == double.infinity) {
+      bestDistance = fallbackDistance;
+      bestIndex = fallbackIndex;
+      bestAlongRoute = fallbackAlongRoute;
+      bestBearing = fallbackBearing;
+      bestSnappedLng = fallbackSnappedLng;
+      bestSnappedLat = fallbackSnappedLat;
     }
 
     return _RouteSnap(
@@ -419,49 +529,76 @@ class MapboxNavigationService {
       distanceMeters: bestDistance,
       distanceAlongRouteMeters: bestAlongRoute,
       segmentBearing: bestBearing,
+      snappedLng: bestSnappedLng,
+      snappedLat: bestSnappedLat,
     );
   }
 
-  double _lookAheadBearing({
-    required double fromLat,
-    required double fromLng,
+  double _routeBearingAtDistance({
     required List<List<double>> coords,
-    required int startIndex,
+    required double distanceAlongRouteMeters,
     double lookAheadMeters = _lookAheadMeters,
   }) {
-    if (coords.isEmpty) return _lastBearing;
-
-    var remaining = lookAheadMeters;
-    var currentIndex = startIndex.clamp(0, coords.length - 1).toInt();
-
-    while (currentIndex < coords.length - 1) {
-      final current = coords[currentIndex];
-      final next = coords[currentIndex + 1];
-      final segmentLength = _haversine(
-        current[1],
-        current[0],
-        next[1],
-        next[0],
-      );
-
-      if (segmentLength > 0 && remaining <= segmentLength) {
-        final fraction = remaining / segmentLength;
-        final interpolatedLng = current[0] + (next[0] - current[0]) * fraction;
-        final interpolatedLat = current[1] + (next[1] - current[1]) * fraction;
-        return _bearingBetween(
-          fromLat,
-          fromLng,
-          interpolatedLat,
-          interpolatedLng,
-        );
-      }
-
-      remaining -= segmentLength;
-      currentIndex++;
+    if (coords.length < 2 || _routeDistanceAtIndex.length != coords.length) {
+      return _lastBearing;
     }
 
-    final last = coords.last;
-    return _bearingBetween(fromLat, fromLng, last[1], last[0]);
+    final from = _coordinateAtRouteDistance(distanceAlongRouteMeters);
+    final to = _coordinateAtRouteDistance(
+      min(
+        _routeDistanceAtIndex.last,
+        distanceAlongRouteMeters + lookAheadMeters,
+      ),
+    );
+    if (from == null || to == null) return _lastBearing;
+
+    final distance = _haversine(from[1], from[0], to[1], to[0]);
+    if (distance < 1 && distanceAlongRouteMeters > 5) {
+      final behind = _coordinateAtRouteDistance(
+        max(0, distanceAlongRouteMeters - lookAheadMeters),
+      );
+      if (behind != null) {
+        return _bearingBetween(behind[1], behind[0], from[1], from[0]);
+      }
+    }
+
+    return _bearingBetween(from[1], from[0], to[1], to[0]);
+  }
+
+  List<double>? _coordinateAtRouteDistance(double distanceMeters) {
+    final route = _route;
+    if (route == null ||
+        route.coordinates.isEmpty ||
+        _routeDistanceAtIndex.length != route.coordinates.length) {
+      return null;
+    }
+
+    final clampedDistance = distanceMeters.clamp(
+      0.0,
+      _routeDistanceAtIndex.last,
+    );
+    for (var i = 0; i < _routeDistanceAtIndex.length - 1; i++) {
+      final startDistance = _routeDistanceAtIndex[i];
+      final endDistance = _routeDistanceAtIndex[i + 1];
+      if (clampedDistance > endDistance) continue;
+
+      final segmentLength = max(endDistance - startDistance, 0.0);
+      final fraction =
+          segmentLength == 0
+              ? 0.0
+              : (clampedDistance - startDistance) / segmentLength;
+      final a = route.coordinates[i];
+      final b = route.coordinates[i + 1];
+      return [a[0] + (b[0] - a[0]) * fraction, a[1] + (b[1] - a[1]) * fraction];
+    }
+
+    return route.coordinates.last;
+  }
+
+  double _normalizeBearing(double bearing) => (bearing + 360) % 360;
+
+  double _shortestBearingDelta(double from, double to) {
+    return ((to - from + 540) % 360) - 180;
   }
 
   double _bearingBetween(double lat1, double lng1, double lat2, double lng2) {
@@ -492,11 +629,15 @@ class _RouteSnap {
   final double distanceMeters;
   final double distanceAlongRouteMeters;
   final double segmentBearing;
+  final double snappedLng;
+  final double snappedLat;
 
   const _RouteSnap({
     required this.closestRouteIndex,
     required this.distanceMeters,
     required this.distanceAlongRouteMeters,
     required this.segmentBearing,
+    required this.snappedLng,
+    required this.snappedLat,
   });
 }

@@ -66,6 +66,14 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   String? _searchError;
   int _searchRequestId = 0;
   Timer? _recenterTimer;
+  Timer? _carAnimationTimer;
+  mapbox.Position? _displayCarPosition;
+  double? _displayCarBearing;
+  mapbox.Position? _carTargetPosition;
+  double _carTargetBearing = 0.0;
+  double _carTargetSpeedMps = 0.0;
+  DateTime? _carTargetAt;
+  DateTime? _lastCarFrameAt;
 
   StreamSubscription<CompassEvent>? _compassSub;
   double? _compassHeading;
@@ -84,6 +92,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   void dispose() {
     _searchDebounce?.cancel();
     _recenterTimer?.cancel();
+    _carAnimationTimer?.cancel();
+    _resetCarAnimationState();
     _searchController.dispose();
     _searchFocusNode.dispose();
     _compassSub?.cancel();
@@ -383,7 +393,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final map = _mapboxMap;
     if (map == null) return;
 
-    await map.easeTo(
+    await map.flyTo(
       mapbox.CameraOptions(bearing: 0.0),
       mapbox.MapAnimationOptions(duration: 500),
     );
@@ -523,6 +533,9 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }
 
   Future<void> _clearAll() async {
+    _carAnimationTimer?.cancel();
+    _resetCarAnimationState();
+
     final map = _mapboxMap;
     if (map != null) {
       final drawing = MapboxDrawingService(mapboxMap: map);
@@ -583,10 +596,14 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _navService = MapboxNavigationService(
       mapboxMap: map,
       compassHeadingProvider: () => _compassHeading,
-      onLocationUpdate: (position, speedKmh, bearing) {
+      onLocationUpdate: (position, speedKmh, bearing, visualPosition) {
         final current = mapbox.Position(position.longitude, position.latitude);
         unawaited(
-          _updateNavigationCarModel(position: current, bearing: bearing),
+          _animateNavigationCarModel(
+            targetPosition: visualPosition,
+            targetBearing: bearing,
+            speedMps: speedKmh / 3.6,
+          ),
         );
         setState(() {
           _currentPosition = current;
@@ -682,6 +699,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   void _stopNavigation() {
     _recenterTimer?.cancel();
     _recenterTimer = null;
+    _carAnimationTimer?.cancel();
+    _resetCarAnimationState();
     _navService?.setFollowModeEnabled(true);
     _navService?.stopNavigation();
     _tts.stop();
@@ -775,9 +794,123 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       modelOpacity: 1.0,
     );
     await map.style.addLayer(layer);
+    _displayCarPosition = position;
+    _displayCarBearing = bearing;
+    _carTargetPosition = position;
+    _carTargetBearing = bearing;
+    _carTargetSpeedMps = 0;
+    _carTargetAt = DateTime.now();
+    _lastCarFrameAt = null;
   }
 
-  Future<void> _updateNavigationCarModel({
+  Future<void> _animateNavigationCarModel({
+    required mapbox.Position targetPosition,
+    required double targetBearing,
+    required double speedMps,
+  }) async {
+    if (!_isNavigating) return;
+
+    final now = DateTime.now();
+    final currentPosition = _displayCarPosition;
+    final distance =
+        currentPosition == null
+            ? 0.0
+            : _distanceBetweenPositions(currentPosition, targetPosition);
+
+    if (currentPosition == null || distance > 80) {
+      _displayCarPosition = targetPosition;
+      _displayCarBearing = targetBearing;
+      await _setNavigationCarModelPose(
+        position: targetPosition,
+        bearing: targetBearing,
+      );
+    }
+
+    _carTargetPosition = targetPosition;
+    _carTargetBearing = targetBearing;
+    _carTargetSpeedMps = speedMps.clamp(0.0, 55.0).toDouble();
+    _carTargetAt = now;
+    _lastCarFrameAt ??= now;
+    _ensureCarAnimationLoop();
+  }
+
+  void _ensureCarAnimationLoop() {
+    if (_carAnimationTimer?.isActive ?? false) return;
+
+    _carAnimationTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      _tickNavigationCarModel();
+    });
+  }
+
+  void _tickNavigationCarModel() {
+    if (!_isNavigating) {
+      _carAnimationTimer?.cancel();
+      _carAnimationTimer = null;
+      return;
+    }
+
+    final target = _carTargetPosition;
+    if (target == null) return;
+
+    final now = DateTime.now();
+    final previousFrameAt = _lastCarFrameAt ?? now;
+    final dtSeconds =
+        now.difference(previousFrameAt).inMilliseconds.clamp(1, 80) / 1000.0;
+    _lastCarFrameAt = now;
+
+    final targetAgeSeconds =
+        _carTargetAt == null
+            ? 0.0
+            : now.difference(_carTargetAt!).inMilliseconds / 1000.0;
+    final predictionMeters =
+        _carTargetSpeedMps < 0.7
+            ? 0.0
+            : (_carTargetSpeedMps * targetAgeSeconds).clamp(0.0, 24.0);
+    final desiredPosition = _offsetPosition(
+      target,
+      _carTargetBearing,
+      predictionMeters,
+    );
+
+    final currentPosition = _displayCarPosition ?? desiredPosition;
+    final currentBearing = _displayCarBearing ?? _carTargetBearing;
+    final distance = _distanceBetweenPositions(
+      currentPosition,
+      desiredPosition,
+    );
+    final minStep = _carTargetSpeedMps > 0.7 ? 0.18 : 0.08;
+    final maxStep = max(
+      minStep,
+      max(_carTargetSpeedMps * dtSeconds * 1.35, distance * 0.12),
+    );
+    final moveT = distance <= maxStep ? 1.0 : maxStep / max(distance, 0.001);
+    final nextPosition = _lerpPosition(currentPosition, desiredPosition, moveT);
+    final bearingT = min(1.0, dtSeconds * 4.5);
+    final nextBearing = _lerpBearing(
+      currentBearing,
+      _carTargetBearing,
+      Curves.easeOut.transform(bearingT),
+    );
+
+    _displayCarPosition = nextPosition;
+    _displayCarBearing = nextBearing;
+    unawaited(
+      _setNavigationCarModelPose(position: nextPosition, bearing: nextBearing),
+    );
+  }
+
+  void _resetCarAnimationState() {
+    _carAnimationTimer = null;
+    _displayCarPosition = null;
+    _displayCarBearing = null;
+    _carTargetPosition = null;
+    _carTargetBearing = 0.0;
+    _carTargetSpeedMps = 0.0;
+    _carTargetAt = null;
+    _lastCarFrameAt = null;
+  }
+
+  Future<void> _setNavigationCarModelPose({
     required mapbox.Position position,
     required double bearing,
   }) async {
@@ -796,6 +929,58 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     } catch (_) {
       await _setupNavigationCarModel(position: position, bearing: bearing);
     }
+  }
+
+  mapbox.Position _lerpPosition(
+    mapbox.Position from,
+    mapbox.Position to,
+    double t,
+  ) {
+    return mapbox.Position(
+      from.lng.toDouble() + (to.lng.toDouble() - from.lng.toDouble()) * t,
+      from.lat.toDouble() + (to.lat.toDouble() - from.lat.toDouble()) * t,
+    );
+  }
+
+  double _lerpBearing(double from, double to, double t) {
+    final delta = ((to - from + 540) % 360) - 180;
+    return (from + delta * t + 360) % 360;
+  }
+
+  double _distanceBetweenPositions(mapbox.Position a, mapbox.Position b) {
+    return _haversine(
+      a.lat.toDouble(),
+      a.lng.toDouble(),
+      b.lat.toDouble(),
+      b.lng.toDouble(),
+    );
+  }
+
+  mapbox.Position _offsetPosition(
+    mapbox.Position position,
+    double bearing,
+    double meters,
+  ) {
+    if (meters <= 0) return position;
+
+    const earthRadius = 6371000.0;
+    final bearingRad = bearing * pi / 180;
+    final latRad = position.lat.toDouble() * pi / 180;
+    final lngRad = position.lng.toDouble() * pi / 180;
+    final angularDistance = meters / earthRadius;
+
+    final nextLat = asin(
+      sin(latRad) * cos(angularDistance) +
+          cos(latRad) * sin(angularDistance) * cos(bearingRad),
+    );
+    final nextLng =
+        lngRad +
+        atan2(
+          sin(bearingRad) * sin(angularDistance) * cos(latRad),
+          cos(angularDistance) - sin(latRad) * sin(nextLat),
+        );
+
+    return mapbox.Position(nextLng * 180 / pi, nextLat * 180 / pi);
   }
 
   double _carModelRotation(double bearing) {
@@ -1514,6 +1699,16 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final x =
         cos(lat1Rad) * sin(lat2Rad) - sin(lat1Rad) * cos(lat2Rad) * cos(dLng);
     return (atan2(y, x) * 180 / pi + 360) % 360;
+  }
+
+  double _haversine(double lat1, double lng1, double lat2, double lng2) {
+    const r = 6371000.0;
+    final dLat = (lat2 - lat1) * pi / 180;
+    final dLng = (lng2 - lng1) * pi / 180;
+    final a =
+        pow(sin(dLat / 2), 2) +
+        cos(lat1 * pi / 180) * cos(lat2 * pi / 180) * pow(sin(dLng / 2), 2);
+    return 2 * r * asin(sqrt(a.toDouble()));
   }
 
   String _formatDistance(double meters) {
