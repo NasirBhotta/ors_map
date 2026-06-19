@@ -1,3 +1,4 @@
+// meri file
 import 'dart:async';
 import 'dart:math';
 
@@ -23,7 +24,6 @@ class MapboxNavigationService {
   double _lastBearing = 0;
   bool _hasBearing = false;
   bool _isRerouting = false;
-  bool _followModeEnabled = true;
   DateTime? _startTime;
   geolocator.Position? _lastPosition;
   mapbox.Position? _lastVisualPosition;
@@ -98,15 +98,12 @@ class MapboxNavigationService {
     _lastBearing = 0;
     _hasBearing = false;
     _isRerouting = false;
-    _followModeEnabled = true;
     _startTime = null;
     _lastPosition = null;
     _lastVisualPosition = null;
   }
 
-  void setFollowModeEnabled(bool enabled) {
-    _followModeEnabled = enabled;
-  }
+  void setFollowModeEnabled(bool enabled) {}
 
   void _setRoute(MapboxRouteResult route) {
     _route = route;
@@ -165,8 +162,6 @@ class MapboxNavigationService {
       visualPosition,
       snap?.distanceAlongRouteMeters,
     );
-    _updateCamera(visualPosition, bearing);
-
     if (route != null && snap != null) {
       _checkProgress(
         position,
@@ -176,21 +171,6 @@ class MapboxNavigationService {
     }
 
     _lastPosition = position;
-  }
-
-  Future<void> _updateCamera(mapbox.Position position, double bearing) async {
-    if (!_followModeEnabled) return;
-
-    await mapboxMap.easeTo(
-      mapbox.CameraOptions(
-        center: mapbox.Point(coordinates: position),
-        zoom: 18.7,
-        pitch: 72.0,
-        bearing: bearing,
-        padding: mapbox.MbxEdgeInsets(top: 80, left: 0, bottom: 300, right: 0),
-      ),
-      mapbox.MapAnimationOptions(duration: 400),
-    );
   }
 
   Future<void> _checkProgress(
