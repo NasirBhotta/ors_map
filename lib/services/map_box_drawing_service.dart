@@ -34,10 +34,13 @@ class MapboxDrawingService {
       mapbox.LineLayer(
         id: _routeCasingLayerId,
         sourceId: _routeSourceId,
+        slot: 'middle',
         lineColor: Colors.black.withValues(alpha: 0.55).toARGB32(),
         lineWidth: 14.0,
         lineCap: mapbox.LineCap.ROUND,
         lineJoin: mapbox.LineJoin.ROUND,
+        lineZOffset: 0.05,
+        lineDepthOcclusionFactor: 0.0,
       ),
     );
 
@@ -45,10 +48,13 @@ class MapboxDrawingService {
       mapbox.LineLayer(
         id: _traveledLayerId,
         sourceId: _traveledSourceId,
+        slot: 'middle',
         lineColor: Colors.grey.shade500.toARGB32(),
         lineWidth: 10.0,
         lineCap: mapbox.LineCap.ROUND,
         lineJoin: mapbox.LineJoin.ROUND,
+        lineZOffset: 0.05,
+        lineDepthOcclusionFactor: 0.0,
       ),
     );
 
@@ -56,10 +62,13 @@ class MapboxDrawingService {
       mapbox.LineLayer(
         id: _routeLayerId,
         sourceId: _routeSourceId,
+        slot: 'middle',
         lineColor: Colors.amberAccent.toARGB32(),
         lineWidth: 9.0,
         lineCap: mapbox.LineCap.ROUND,
         lineJoin: mapbox.LineJoin.ROUND,
+        lineZOffset: 0.05,
+        lineDepthOcclusionFactor: 0.0,
       ),
     );
   }

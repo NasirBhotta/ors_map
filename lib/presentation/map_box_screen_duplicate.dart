@@ -61,7 +61,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   mapbox.PointAnnotation? _destinationMarker;
   static const double _carLngOffset = 0.000000;
   static const double _carLatOffset = 0.000009;
-  static const double _routeStartSnapMeters = 50.0;
+  static const double _routeStartSnapMeters = 5.0;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   Timer? _searchDebounce;
@@ -316,7 +316,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
   Future<void> _searchPlaces(String query) async {
     final requestId = ++_searchRequestId;
-    final current = _currentPosition;
+    final current = await _currentNavigationPosition();
     final mapboxToken = ApiKeyService.mapboxAccessToken;
 
     if (mapboxToken.isEmpty) {
@@ -414,7 +414,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }
 
   Future<void> _moveCameraToCurrentLocation() async {
-    final current = _currentPosition;
+    final current = await _currentNavigationPosition();
     final map = _mapboxMap;
     if (current == null || map == null) return;
 
@@ -578,8 +578,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }
 
   void _startNavigation() async {
-    await initBackgroundService();
-    FlutterBackgroundService().startService();
+    unawaited(
+      initBackgroundService().then(
+        (_) => FlutterBackgroundService().startService(),
+      ),
+    );
     var route = _activeRoute;
     final destination = _activeDestination;
     final map = _mapboxMap;
@@ -604,6 +607,23 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     if (current != null &&
         routeStart != null &&
         distanceFromRouteStart > _routeStartSnapMeters) {
+      final provisionalBearing = _initialRouteBearing(route);
+      await _setupNavigationCarModel(
+        position: current,
+        bearing: provisionalBearing,
+      );
+      _displayCarRouteDistance = null;
+      _carTargetRouteDistance = null;
+      unawaited(
+        map.easeTo(
+          _navigationCamera(
+            lat: current.lat.toDouble(),
+            lng: current.lng.toDouble(),
+            bearing: provisionalBearing,
+          ),
+          mapbox.MapAnimationOptions(duration: 300),
+        ),
+      );
       setState(
         () => _currentInstruction = 'Finding route from current location...',
       );
@@ -622,6 +642,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         );
         final drawing = MapboxDrawingService(mapboxMap: map);
         await drawing.drawRoute(freshRoute);
+        await _keepCarLayerAboveRoute();
         setState(() {
           _activeRoute = freshRoute;
           _remainingDistanceText = freshRoute.distanceText;
@@ -713,6 +734,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       onRouteChanged: (newRoute) async {
         final drawing = MapboxDrawingService(mapboxMap: map);
         await drawing.drawRoute(newRoute);
+        await _keepCarLayerAboveRoute();
         _buildDisplayRouteMetrics(newRoute);
         _resetCarAnimationState();
         if (!mounted) return;
@@ -823,6 +845,22 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     );
   }
 
+  Future<mapbox.Position?> _currentNavigationPosition() async {
+    try {
+      final position = await geolocator.Geolocator.getCurrentPosition(
+        locationSettings: const geolocator.LocationSettings(
+          accuracy: geolocator.LocationAccuracy.bestForNavigation,
+          timeLimit: Duration(seconds: 2),
+        ),
+      );
+      final current = mapbox.Position(position.longitude, position.latitude);
+      _currentPosition = current;
+      return current;
+    } catch (_) {
+      return _currentPosition;
+    }
+  }
+
   void _resetCameraToCurrentLocation() {
     final current = _currentPosition;
     final map = _mapboxMap;
@@ -875,6 +913,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final layer = mapbox.ModelLayer(
       id: _carModelLayerId,
       sourceId: _carModelSourceId,
+      slot: 'top',
       modelId: _carModelUri,
       modelScale: const [_carModelScale, _carModelScale, _carModelScale],
       modelRotation: [0.0, 0.0, _carModelRotation(bearing)],
@@ -885,6 +924,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       modelOpacity: 1.0,
     );
     await map.style.addLayer(layer);
+    await _keepCarLayerAboveRoute();
     _displayCarPosition = position;
     _displayCarBearing = bearing;
     _carTargetPosition = position;
@@ -892,6 +932,18 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _carTargetSpeedMps = 0;
     _carTargetAt = DateTime.now();
     _lastCarFrameAt = null;
+  }
+
+  Future<void> _keepCarLayerAboveRoute() async {
+    final map = _mapboxMap;
+    if (map == null) return;
+
+    try {
+      await map.style.moveStyleLayer(
+        _carModelLayerId,
+        mapbox.LayerPosition(above: 'route-layer'),
+      );
+    } catch (_) {}
   }
 
   Future<void> _animateNavigationCarModel({
