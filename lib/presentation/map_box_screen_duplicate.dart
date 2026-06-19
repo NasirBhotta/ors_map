@@ -72,8 +72,13 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   mapbox.Position? _carTargetPosition;
   double _carTargetBearing = 0.0;
   double _carTargetSpeedMps = 0.0;
+  double? _displayCarRouteDistance;
+  double? _carTargetRouteDistance;
   DateTime? _carTargetAt;
   DateTime? _lastCarFrameAt;
+  DateTime? _lastRouteProgressPaintAt;
+  bool _routeProgressPaintInFlight = false;
+  final List<double> _displayRouteDistanceAtIndex = [];
 
   StreamSubscription<CompassEvent>? _compassSub;
   double? _compassHeading;
@@ -520,6 +525,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       toLng: destination.lng.toDouble(),
       toLat: destination.lat.toDouble(),
     );
+    _buildDisplayRouteMetrics(result);
 
     setState(() {
       _activeRoute = result;
@@ -535,6 +541,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   Future<void> _clearAll() async {
     _carAnimationTimer?.cancel();
     _resetCarAnimationState();
+    _displayRouteDistanceAtIndex.clear();
 
     final map = _mapboxMap;
     if (map != null) {
@@ -596,13 +603,20 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _navService = MapboxNavigationService(
       mapboxMap: map,
       compassHeadingProvider: () => _compassHeading,
-      onLocationUpdate: (position, speedKmh, bearing, visualPosition) {
+      onLocationUpdate: (
+        position,
+        speedKmh,
+        bearing,
+        visualPosition,
+        routeDistance,
+      ) {
         final current = mapbox.Position(position.longitude, position.latitude);
         unawaited(
           _animateNavigationCarModel(
             targetPosition: visualPosition,
             targetBearing: bearing,
             speedMps: speedKmh / 3.6,
+            targetRouteDistance: routeDistance,
           ),
         );
         setState(() {
@@ -631,6 +645,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       onRouteChanged: (newRoute) async {
         final drawing = MapboxDrawingService(mapboxMap: map);
         await drawing.drawRoute(newRoute);
+        _buildDisplayRouteMetrics(newRoute);
+        _resetCarAnimationState();
         if (!mounted) return;
         setState(() {
           _activeRoute = newRoute;
@@ -646,8 +662,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         remainingDistanceMeters,
         remainingDurationSeconds,
       ) async {
-        final drawing = MapboxDrawingService(mapboxMap: map);
-        await drawing.updateRouteProgress(progressRoute, closestRouteIndex);
         if (!mounted) return;
         setState(() {
           _remainingDistanceText = _formatDistance(remainingDistanceMeters);
@@ -681,6 +695,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     if (_activeRoute != null && _activeRoute!.steps.isNotEmpty) {
       _upcomingSteps = _activeRoute!.steps.take(3).toList();
     }
+    _buildDisplayRouteMetrics(route);
     _navService!.startNavigation(route: route, destination: destination);
 
     setState(() {
@@ -807,6 +822,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     required mapbox.Position targetPosition,
     required double targetBearing,
     required double speedMps,
+    required double? targetRouteDistance,
   }) async {
     if (!_isNavigating) return;
 
@@ -828,7 +844,24 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     _carTargetPosition = targetPosition;
     _carTargetBearing = targetBearing;
-    _carTargetSpeedMps = speedMps.clamp(0.0, 55.0).toDouble();
+    final previousRouteTarget = _carTargetRouteDistance;
+    final previousTargetAt = _carTargetAt;
+    var effectiveSpeedMps = speedMps;
+    if (targetRouteDistance != null &&
+        previousRouteTarget != null &&
+        previousTargetAt != null) {
+      final elapsedSeconds =
+          now.difference(previousTargetAt).inMilliseconds / 1000.0;
+      final routeDelta = targetRouteDistance - previousRouteTarget;
+      if (elapsedSeconds > 0 && routeDelta > 0) {
+        effectiveSpeedMps = max(effectiveSpeedMps, routeDelta / elapsedSeconds);
+      }
+    }
+    _carTargetSpeedMps = effectiveSpeedMps.clamp(0.0, 55.0).toDouble();
+    _carTargetRouteDistance = targetRouteDistance;
+    if (_displayCarRouteDistance == null && targetRouteDistance != null) {
+      _displayCarRouteDistance = targetRouteDistance;
+    }
     _carTargetAt = now;
     _lastCarFrameAt ??= now;
     _ensureCarAnimationLoop();
@@ -866,11 +899,20 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         _carTargetSpeedMps < 0.7
             ? 0.0
             : (_carTargetSpeedMps * targetAgeSeconds).clamp(0.0, 24.0);
-    final desiredPosition = _offsetPosition(
-      target,
-      _carTargetBearing,
-      predictionMeters,
-    );
+    final desiredRouteDistance =
+        _carTargetRouteDistance == null
+            ? null
+            : (_carTargetRouteDistance! + predictionMeters).clamp(
+              0.0,
+              _displayRouteLength,
+            );
+    final desiredRoutePosition =
+        desiredRouteDistance == null
+            ? null
+            : _positionAtRouteDistance(desiredRouteDistance);
+    final desiredPosition =
+        desiredRoutePosition ??
+        _offsetPosition(target, _carTargetBearing, predictionMeters);
 
     final currentPosition = _displayCarPosition ?? desiredPosition;
     final currentBearing = _displayCarBearing ?? _carTargetBearing;
@@ -884,7 +926,19 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       max(_carTargetSpeedMps * dtSeconds * 1.35, distance * 0.12),
     );
     final moveT = distance <= maxStep ? 1.0 : maxStep / max(distance, 0.001);
-    final nextPosition = _lerpPosition(currentPosition, desiredPosition, moveT);
+    final currentRouteDistance = _displayCarRouteDistance;
+    final nextRouteDistance =
+        desiredRouteDistance != null && currentRouteDistance != null
+            ? currentRouteDistance +
+                (desiredRouteDistance - currentRouteDistance) * moveT
+            : null;
+    final nextRoutePosition =
+        nextRouteDistance == null
+            ? null
+            : _positionAtRouteDistance(nextRouteDistance);
+    final nextPosition =
+        nextRoutePosition ??
+        _lerpPosition(currentPosition, desiredPosition, moveT);
     final bearingT = min(1.0, dtSeconds * 4.5);
     final nextBearing = _lerpBearing(
       currentBearing,
@@ -894,9 +948,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     _displayCarPosition = nextPosition;
     _displayCarBearing = nextBearing;
+    _displayCarRouteDistance = nextRouteDistance;
     unawaited(
       _setNavigationCarModelPose(position: nextPosition, bearing: nextBearing),
     );
+    unawaited(_paintDisplayedRouteProgress());
   }
 
   void _resetCarAnimationState() {
@@ -906,8 +962,12 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _carTargetPosition = null;
     _carTargetBearing = 0.0;
     _carTargetSpeedMps = 0.0;
+    _displayCarRouteDistance = null;
+    _carTargetRouteDistance = null;
     _carTargetAt = null;
     _lastCarFrameAt = null;
+    _lastRouteProgressPaintAt = null;
+    _routeProgressPaintInFlight = false;
   }
 
   Future<void> _setNavigationCarModelPose({
@@ -954,6 +1014,81 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       b.lat.toDouble(),
       b.lng.toDouble(),
     );
+  }
+
+  double get _displayRouteLength =>
+      _displayRouteDistanceAtIndex.isEmpty
+          ? 0.0
+          : _displayRouteDistanceAtIndex.last;
+
+  void _buildDisplayRouteMetrics(MapboxRouteResult route) {
+    _displayRouteDistanceAtIndex
+      ..clear()
+      ..add(0);
+
+    for (var i = 1; i < route.coordinates.length; i++) {
+      final previous = route.coordinates[i - 1];
+      final current = route.coordinates[i];
+      _displayRouteDistanceAtIndex.add(
+        _displayRouteDistanceAtIndex.last +
+            _haversine(previous[1], previous[0], current[1], current[0]),
+      );
+    }
+  }
+
+  mapbox.Position? _positionAtRouteDistance(double distanceMeters) {
+    final route = _activeRoute;
+    if (route == null ||
+        route.coordinates.isEmpty ||
+        _displayRouteDistanceAtIndex.length != route.coordinates.length) {
+      return null;
+    }
+
+    final targetDistance = distanceMeters.clamp(0.0, _displayRouteLength);
+    for (var i = 0; i < _displayRouteDistanceAtIndex.length - 1; i++) {
+      final startDistance = _displayRouteDistanceAtIndex[i];
+      final endDistance = _displayRouteDistanceAtIndex[i + 1];
+      if (targetDistance > endDistance) continue;
+
+      final segmentLength = max(endDistance - startDistance, 0.0);
+      final fraction =
+          segmentLength == 0
+              ? 0.0
+              : (targetDistance - startDistance) / segmentLength;
+      final a = route.coordinates[i];
+      final b = route.coordinates[i + 1];
+      return mapbox.Position(
+        a[0] + (b[0] - a[0]) * fraction,
+        a[1] + (b[1] - a[1]) * fraction,
+      );
+    }
+
+    final last = route.coordinates.last;
+    return mapbox.Position(last[0], last[1]);
+  }
+
+  Future<void> _paintDisplayedRouteProgress() async {
+    final route = _activeRoute;
+    final map = _mapboxMap;
+    final distance = _displayCarRouteDistance;
+    if (route == null || map == null || distance == null) return;
+    if (_routeProgressPaintInFlight) return;
+
+    final now = DateTime.now();
+    final lastPaintAt = _lastRouteProgressPaintAt;
+    if (lastPaintAt != null &&
+        now.difference(lastPaintAt).inMilliseconds < 80) {
+      return;
+    }
+
+    _lastRouteProgressPaintAt = now;
+    _routeProgressPaintInFlight = true;
+    try {
+      final drawing = MapboxDrawingService(mapboxMap: map);
+      await drawing.updateRouteProgressByDistance(route, distance);
+    } finally {
+      _routeProgressPaintInFlight = false;
+    }
   }
 
   mapbox.Position _offsetPosition(

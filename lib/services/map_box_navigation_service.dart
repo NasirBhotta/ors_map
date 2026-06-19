@@ -41,6 +41,7 @@ class MapboxNavigationService {
     double speedKmh,
     double bearing,
     mapbox.Position visualPosition,
+    double? visualDistanceAlongRouteMeters,
   )?
   onLocationUpdate;
   final void Function(int stepIndex, MapboxStep step)? onStepChanged;
@@ -157,7 +158,13 @@ class MapboxNavigationService {
 
     final speedKmh = (position.speed * 3.6).clamp(0.0, 300.0);
 
-    onLocationUpdate?.call(position, speedKmh, bearing, visualPosition);
+    onLocationUpdate?.call(
+      position,
+      speedKmh,
+      bearing,
+      visualPosition,
+      snap?.distanceAlongRouteMeters,
+    );
     _updateCamera(visualPosition, bearing);
 
     if (route != null && snap != null) {
@@ -174,7 +181,7 @@ class MapboxNavigationService {
   Future<void> _updateCamera(mapbox.Position position, double bearing) async {
     if (!_followModeEnabled) return;
 
-    await mapboxMap.flyTo(
+    await mapboxMap.easeTo(
       mapbox.CameraOptions(
         center: mapbox.Point(coordinates: position),
         zoom: 18.7,

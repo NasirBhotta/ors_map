@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
@@ -91,6 +92,29 @@ class MapboxDrawingService {
     } catch (_) {}
   }
 
+  Future<void> updateRouteProgressByDistance(
+    MapboxRouteResult route,
+    double distanceAlongRouteMeters,
+  ) async {
+    if (route.coordinates.length < 2) return;
+
+    final split = _splitRouteAtDistance(route, distanceAlongRouteMeters);
+
+    try {
+      final traveledSource =
+          await mapboxMap.style.getSource(_traveledSourceId)
+              as mapbox.GeoJsonSource;
+      await traveledSource.updateGeoJSON(_lineGeoJson(split.traveled));
+    } catch (_) {}
+
+    try {
+      final routeSource =
+          await mapboxMap.style.getSource(_routeSourceId)
+              as mapbox.GeoJsonSource;
+      await routeSource.updateGeoJSON(_lineGeoJson(split.remaining));
+    } catch (_) {}
+  }
+
   Future<void> clearRoute() async {
     for (final id in [_routeLayerId, _traveledLayerId, _routeCasingLayerId]) {
       try {
@@ -147,4 +171,84 @@ class MapboxDrawingService {
       'properties': {},
     });
   }
+
+  _RouteSplit _splitRouteAtDistance(
+    MapboxRouteResult route,
+    double distanceAlongRouteMeters,
+  ) {
+    final coords = route.coordinates;
+    final totalDistance = _routeLength(coords);
+    final targetDistance = distanceAlongRouteMeters.clamp(0.0, totalDistance);
+    final traveled = <List<double>>[];
+    final remaining = <List<double>>[];
+
+    var cumulative = 0.0;
+    for (var i = 0; i < coords.length - 1; i++) {
+      final a = coords[i];
+      final b = coords[i + 1];
+      final segmentLength = _haversine(a[1], a[0], b[1], b[0]);
+
+      if (cumulative + segmentLength < targetDistance) {
+        if (traveled.isEmpty) traveled.add(a);
+        traveled.add(b);
+        cumulative += segmentLength;
+        continue;
+      }
+
+      final fraction =
+          segmentLength == 0
+              ? 0.0
+              : ((targetDistance - cumulative) / segmentLength).clamp(0.0, 1.0);
+      final splitPoint = <double>[
+        a[0] + (b[0] - a[0]) * fraction,
+        a[1] + (b[1] - a[1]) * fraction,
+      ];
+
+      if (traveled.isEmpty) traveled.add(a);
+      traveled.add(splitPoint);
+      remaining
+        ..add(splitPoint)
+        ..addAll(coords.sublist(i + 1));
+      return _RouteSplit(traveled: traveled, remaining: remaining);
+    }
+
+    return _RouteSplit(traveled: coords, remaining: [coords.last]);
+  }
+
+  double _routeLength(List<List<double>> coords) {
+    var total = 0.0;
+    for (var i = 0; i < coords.length - 1; i++) {
+      total += _haversine(
+        coords[i][1],
+        coords[i][0],
+        coords[i + 1][1],
+        coords[i + 1][0],
+      );
+    }
+    return total;
+  }
+
+  double _haversine(double lat1, double lng1, double lat2, double lng2) {
+    const r = 6371000.0;
+    final dLat = (lat2 - lat1) * 0.017453292519943295;
+    final dLng = (lng2 - lng1) * 0.017453292519943295;
+    final lat1Rad = lat1 * 0.017453292519943295;
+    final lat2Rad = lat2 * 0.017453292519943295;
+    final a =
+        _sinSquared(dLat / 2) +
+        cos(lat1Rad) * cos(lat2Rad) * _sinSquared(dLng / 2);
+    return 2 * r * asin(sqrt(a));
+  }
+
+  double _sinSquared(double value) {
+    final sinValue = sin(value);
+    return sinValue * sinValue;
+  }
+}
+
+class _RouteSplit {
+  final List<List<double>> traveled;
+  final List<List<double>> remaining;
+
+  const _RouteSplit({required this.traveled, required this.remaining});
 }
