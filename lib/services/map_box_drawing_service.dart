@@ -17,7 +17,10 @@ class MapboxDrawingService {
 
   MapboxDrawingService({required this.mapboxMap});
 
-  Future<void> drawRoute(MapboxRouteResult route) async {
+  Future<void> drawRoute(
+    MapboxRouteResult route, {
+    String? belowLayerId,
+  }) async {
     await clearRoute();
 
     await mapboxMap.style.addSource(
@@ -30,47 +33,69 @@ class MapboxDrawingService {
       ),
     );
 
-    await mapboxMap.style.addLayer(
+    await _addRouteLayer(
       mapbox.LineLayer(
         id: _routeCasingLayerId,
         sourceId: _routeSourceId,
-        slot: 'middle',
+        slot: 'top',
         lineColor: Colors.black.withValues(alpha: 0.55).toARGB32(),
         lineWidth: 14.0,
         lineCap: mapbox.LineCap.ROUND,
         lineJoin: mapbox.LineJoin.ROUND,
-        lineZOffset: 0.05,
-        lineDepthOcclusionFactor: 0.0,
+        lineZOffset: 0.0,
+        lineDepthOcclusionFactor: 1.0,
       ),
+      belowLayerId: belowLayerId,
     );
 
-    await mapboxMap.style.addLayer(
+    await _addRouteLayer(
       mapbox.LineLayer(
         id: _traveledLayerId,
         sourceId: _traveledSourceId,
-        slot: 'middle',
+        slot: 'top',
         lineColor: Colors.grey.shade500.toARGB32(),
         lineWidth: 10.0,
         lineCap: mapbox.LineCap.ROUND,
         lineJoin: mapbox.LineJoin.ROUND,
-        lineZOffset: 0.05,
-        lineDepthOcclusionFactor: 0.0,
+        lineZOffset: 0.0,
+        lineDepthOcclusionFactor: 1.0,
       ),
+      belowLayerId: belowLayerId,
     );
 
-    await mapboxMap.style.addLayer(
+    await _addRouteLayer(
       mapbox.LineLayer(
         id: _routeLayerId,
         sourceId: _routeSourceId,
-        slot: 'middle',
+        slot: 'top',
         lineColor: Colors.amberAccent.toARGB32(),
         lineWidth: 9.0,
         lineCap: mapbox.LineCap.ROUND,
         lineJoin: mapbox.LineJoin.ROUND,
-        lineZOffset: 0.05,
-        lineDepthOcclusionFactor: 0.0,
+        lineZOffset: 0.0,
+        lineDepthOcclusionFactor: 1.0,
       ),
+      belowLayerId: belowLayerId,
     );
+  }
+
+  Future<void> _addRouteLayer(
+    mapbox.LineLayer layer, {
+    required String? belowLayerId,
+  }) async {
+    if (belowLayerId == null) {
+      await mapboxMap.style.addLayer(layer);
+      return;
+    }
+
+    try {
+      await mapboxMap.style.addLayerAt(
+        layer,
+        mapbox.LayerPosition(below: belowLayerId),
+      );
+    } catch (_) {
+      await mapboxMap.style.addLayer(layer);
+    }
   }
 
   Future<void> updateRouteProgress(

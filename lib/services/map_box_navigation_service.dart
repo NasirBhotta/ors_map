@@ -81,7 +81,7 @@ class MapboxNavigationService {
     _gpsSub = geolocator.Geolocator.getPositionStream(
       locationSettings: const geolocator.LocationSettings(
         accuracy: geolocator.LocationAccuracy.bestForNavigation,
-        distanceFilter: 1,
+        distanceFilter: 5,
       ),
     ).listen(_onLocationUpdate);
   }

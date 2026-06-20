@@ -39,6 +39,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const Color _panelBorder = Color(0xFFE2E8F0);
   static const double _panelRadius = 8.0;
 
+  int? _dbgLastTickMs;
+  int? _dbgPaintSkipCount;
+  int? _dbgThrottleSkipCount;
+
   mapbox.MapboxMap? _mapboxMap;
   mapbox.Position? _currentPosition;
 
@@ -72,22 +76,19 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   Timer? _recenterTimer;
 
   Timer? _carAnimationTimer;
+  bool _carAnimLoopRunning = false;
   mapbox.Position? _displayCarPosition;
   double? _displayCarBearing;
   double? _displayCarRouteDistance;
 
-  // Tween anchor: jahan se yeh animation segment shuru hua, aur jahan
-  // jaana hai (latest GPS fix). Har naye fix par fresh tween shuru hota
-  // hai, jiski duration = asli gap jo pichle aur naye fix ke beech laga.
-  mapbox.Position? _carAnimStartPosition;
-  double? _carAnimStartBearing;
-  double? _carAnimStartRouteDistance;
+  // Latest GPS/navigation target. The animation loop follows this target every
+  // frame using speed + dt, so GPS timing never controls the visible motion.
   mapbox.Position? _carTargetPosition;
   double _carTargetBearing = 0.0;
   double? _carTargetRouteDistance;
-  DateTime? _carAnimStartAt;
-  int _carAnimDurationMs = 700;
+  double _carTargetSpeedMps = 0.0;
   DateTime? _lastLocationUpdateAt;
+  DateTime? _lastCarAnimationTickAt;
 
   DateTime? _lastCarPosePaintAt;
   bool _carPosePaintInFlight = false;
@@ -749,7 +750,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         await drawing.drawRoute(newRoute);
         await _keepCarLayerAboveRoute();
         _buildDisplayRouteMetrics(newRoute);
-        _resetCarAnimationState();
         if (!mounted) return;
         setState(() {
           _activeRoute = newRoute;
@@ -758,6 +758,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             Duration(seconds: newRoute.durationSeconds.toInt()),
           );
         });
+        _reseedDisplayedCarForRoute(newRoute);
       },
       onRouteProgress: (
         progressRoute,
@@ -919,7 +920,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     await map.style.addSource(
       mapbox.GeoJsonSource(
         id: _carModelSourceId,
-        data: _carPointGeoJson(position),
+        data: _carPointGeoJson(position, bearing),
       ),
     );
 
@@ -929,7 +930,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       slot: 'top',
       modelId: _carModelUri,
       modelScale: const [_carModelScale, _carModelScale, _carModelScale],
-      modelRotation: [0.0, 0.0, _carModelRotation(bearing)],
+      modelRotation: [0.0, 0.0, 0.0],
       modelType: mapbox.ModelType.COMMON_3D,
       modelCastShadows: false,
       modelReceiveShadows: false,
@@ -937,18 +938,20 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       modelOpacity: 1.0,
     );
     await map.style.addLayer(layer);
+    await map.style.setStyleLayerProperty(_carModelLayerId, 'model-rotation', [
+      0.0,
+      0.0,
+      _carModelRotation(bearing),
+    ]);
     await _keepCarLayerAboveRoute();
     _displayCarPosition = position;
     _displayCarBearing = bearing;
-    _carAnimStartPosition = position;
-    _carAnimStartBearing = bearing;
-    _carAnimStartRouteDistance = _displayCarRouteDistance;
     _carTargetPosition = position;
     _carTargetBearing = bearing;
     _carTargetRouteDistance = _displayCarRouteDistance;
-    _carAnimStartAt = DateTime.now();
-    _carAnimDurationMs = 700;
+    _carTargetSpeedMps = 0.0;
     _lastLocationUpdateAt = null;
+    _lastCarAnimationTickAt = DateTime.now();
   }
 
   Future<void> _keepCarLayerAboveRoute() async {
@@ -972,14 +975,25 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     if (!_isNavigating) return;
 
     final now = DateTime.now();
+    final previousUpdateAt = _lastLocationUpdateAt;
+    final elapsedSinceLastFixMs =
+        previousUpdateAt == null
+            ? 700
+            : now.difference(previousUpdateAt).inMilliseconds;
 
-    // Bahut bada jump (reroute / GPS warm-up) -> seedha snap, tween nahi.
     final currentPosition = _displayCarPosition;
     final jumpDistance =
         currentPosition == null
             ? 0.0
             : _distanceBetweenPositions(currentPosition, targetPosition);
-    if (currentPosition == null || jumpDistance > 80) {
+    final plausibleMaxJump =
+        (max(
+          80.0,
+          (elapsedSinceLastFixMs / 1000.0) * 60.0,
+        )).clamp(80.0, 500.0).toDouble();
+
+    if (currentPosition == null || jumpDistance > plausibleMaxJump) {
+      // Teleport — hard snap, phir wahan se smooth shuru
       _displayCarPosition = targetPosition;
       _displayCarBearing = targetBearing;
       _displayCarRouteDistance = targetRouteDistance;
@@ -989,70 +1003,110 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       );
     }
 
-    // FIX: duration = ASLI time jo pichle fix se laga (clamp ke saath),
-    // koi speed-guess nahi. Yehi cheez "chal-ruk-chal" wala bug fix karti
-    // hai — purana code speed se predict karta tha aur ek ceiling pe
-    // freeze ho jaata tha.
-    final previousUpdateAt = _lastLocationUpdateAt;
-    final rawIntervalMs =
-        previousUpdateAt == null
-            ? 700
-            : now.difference(previousUpdateAt).inMilliseconds;
-    _carAnimDurationMs = rawIntervalMs.clamp(180, 1500);
-    _lastLocationUpdateAt = now;
-
-    _carAnimStartPosition = _displayCarPosition ?? targetPosition;
-    _carAnimStartBearing = _displayCarBearing ?? targetBearing;
-    _carAnimStartRouteDistance =
-        _displayCarRouteDistance ?? targetRouteDistance;
-    _carAnimStartAt = now;
-
+    // GPS only refreshes the target. The permanent animation loop decides how
+    // far the displayed car moves each frame from speed and dt.
     _carTargetPosition = targetPosition;
     _carTargetBearing = targetBearing;
     _carTargetRouteDistance = targetRouteDistance;
+    _carTargetSpeedMps = max(0.0, speedMps);
+    _lastLocationUpdateAt = now;
 
     _ensureCarAnimationLoop();
   }
 
   void _ensureCarAnimationLoop() {
-    if (_carAnimationTimer?.isActive ?? false) return;
+    if (_carAnimLoopRunning) {
+      debugPrint('⚪ LOOP-ALREADY-RUNNING: skipping restart'); // normal hai
+      return;
+    }
+    debugPrint(
+      '🟢 LOOP-START: starting fresh animation loop',
+    ); // yeh baar baar aaye to masla hai
+    // Agar loop chal raha hai, kuch mat karo — sirf target update hua hai
+    if (_carAnimLoopRunning) return;
+    _carAnimLoopRunning = true;
+    _lastCarAnimationTickAt = DateTime.now();
 
+    _carAnimationTimer?.cancel();
     _carAnimationTimer = Timer.periodic(const Duration(milliseconds: 16), (_) {
+      if (!_isNavigating) {
+        // Navigation band — loop gracefully stop karo
+        _carAnimationTimer?.cancel();
+        _carAnimationTimer = null;
+        _carAnimLoopRunning = false;
+        _lastCarAnimationTickAt = null;
+        return;
+      }
       _tickNavigationCarModel();
     });
   }
 
   void _tickNavigationCarModel() {
+    final tickNow = DateTime.now().millisecondsSinceEpoch;
+    if (_dbgLastTickMs != null) {
+      final gap = tickNow - _dbgLastTickMs!;
+      if (gap > 40) {
+        // 40ms = 2.5 frames miss ho gaye
+        debugPrint('🔴 TICK-GAP: ${gap}ms — timer late ya band tha');
+      }
+    }
+    _dbgLastTickMs = tickNow;
+    // ─────────────────────────────────────────────────────────────────
+
     if (!_isNavigating) {
       _carAnimationTimer?.cancel();
       _carAnimationTimer = null;
+      _carAnimLoopRunning = false;
+      _lastCarAnimationTickAt = null;
+      debugPrint('🟡 LOOP-STOP: _isNavigating=false'); // ← add karo
       return;
     }
-
+    // Loop guard check — _isNavigating check timer callback mein already hai
     final target = _carTargetPosition;
-    final startAt = _carAnimStartAt;
-    if (target == null || startAt == null) return;
-
     final now = DateTime.now();
-    final elapsedMs = now.difference(startAt).inMilliseconds;
-    // FIX: linear t — eased curves per-segment baar baar restart hone se
-    // "decel-accel-decel" wali pulsing feel deti hain. Linear = ek jaisi
-    // constant-speed glide, jo asli driving jaisa lagta hai.
-    final t =
-        _carAnimDurationMs <= 0
-            ? 1.0
-            : (elapsedMs / _carAnimDurationMs).clamp(0.0, 1.0).toDouble();
+    final lastTickAt = _lastCarAnimationTickAt;
+    _lastCarAnimationTickAt = now;
+    if (target == null || _displayCarPosition == null) return;
 
-    final startRouteDistance = _carAnimStartRouteDistance;
-    final targetRouteDistance = _carTargetRouteDistance;
-    final nextRouteDistance =
-        startRouteDistance != null && targetRouteDistance != null
-            ? startRouteDistance +
-                (targetRouteDistance - startRouteDistance) * t
-            : null;
-    // Route-distance se position nikalna behtar hai kyunki yeh road ke
-    // curve ko follow karta hai — seedhi lerp nahi, jo corners cut kar
-    // deti hai.
+    final dtSeconds =
+        lastTickAt == null
+            ? 1 / 60
+            : (now.difference(lastTickAt).inMilliseconds / 1000.0)
+                .clamp(0.0, 0.12)
+                .toDouble();
+    if (dtSeconds <= 0) return;
+
+    final speedMps = max(0.0, _carTargetSpeedMps);
+    var desiredPosition = target;
+    var desiredRouteDistance = _carTargetRouteDistance;
+
+    if (speedMps > 0) {
+      if (desiredRouteDistance != null) {
+        desiredRouteDistance =
+            (desiredRouteDistance + speedMps * dtSeconds)
+                .clamp(0.0, _displayRouteLength)
+                .toDouble();
+        _carTargetRouteDistance = desiredRouteDistance;
+        desiredPosition =
+            _positionAtRouteDistance(desiredRouteDistance) ?? target;
+        _carTargetPosition = desiredPosition;
+      } else {
+        desiredPosition = _offsetPosition(
+          target,
+          _carTargetBearing,
+          speedMps * dtSeconds,
+        );
+        _carTargetPosition = desiredPosition;
+      }
+    }
+
+    final nextRouteDistance = _nextDisplayedRouteDistance(
+      currentDistance: _displayCarRouteDistance,
+      desiredDistance: desiredRouteDistance,
+      dtSeconds: dtSeconds,
+      speedMps: speedMps,
+    );
+
     final routePosition =
         nextRouteDistance == null
             ? null
@@ -1060,11 +1114,17 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     final nextPosition =
         routePosition ??
-        _lerpPosition(_carAnimStartPosition ?? target, target, t);
+        _nextFreeDrivePosition(
+          currentPosition: _displayCarPosition!,
+          desiredPosition: desiredPosition,
+          dtSeconds: dtSeconds,
+          speedMps: speedMps,
+        );
+    final bearingT = (dtSeconds * 5.0).clamp(0.0, 1.0).toDouble();
     final nextBearing = _lerpBearing(
-      _carAnimStartBearing ?? _carTargetBearing,
+      _displayCarBearing ?? _carTargetBearing,
       _carTargetBearing,
-      t,
+      bearingT,
     );
 
     _displayCarPosition = nextPosition;
@@ -1074,22 +1134,23 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     unawaited(_paintDisplayedCarPose(nextPosition, nextBearing));
     unawaited(_followDisplayedCarCamera(nextPosition, nextBearing));
     unawaited(_paintDisplayedRouteProgress());
+
+    // The loop keeps ticking while navigation is active, even between GPS fixes.
   }
 
   void _resetCarAnimationState() {
+    _carAnimationTimer?.cancel();
+    _carAnimLoopRunning = false; // ← yeh add karo
     _carAnimationTimer = null;
     _displayCarPosition = null;
     _displayCarBearing = null;
     _displayCarRouteDistance = null;
-    _carAnimStartPosition = null;
-    _carAnimStartBearing = null;
-    _carAnimStartRouteDistance = null;
     _carTargetPosition = null;
     _carTargetBearing = 0.0;
     _carTargetRouteDistance = null;
-    _carAnimStartAt = null;
-    _carAnimDurationMs = 700;
+    _carTargetSpeedMps = 0.0;
     _lastLocationUpdateAt = null;
+    _lastCarAnimationTickAt = null;
     _lastCarPosePaintAt = null;
     _carPosePaintInFlight = false;
     _lastCameraFollowAt = null;
@@ -1102,19 +1163,44 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     mapbox.Position position,
     double bearing,
   ) async {
-    if (_carPosePaintInFlight) return;
-
+    // ── DEBUG LOG 2: paint skip tracking ─────────────────────────────
+    if (_carPosePaintInFlight) {
+      _dbgPaintSkipCount = (_dbgPaintSkipCount ?? 0) + 1;
+      if (_dbgPaintSkipCount! % 10 == 0) {
+        debugPrint(
+          '🔴 PAINT-SKIP x$_dbgPaintSkipCount: inFlight still true — Mapbox async slow?',
+        );
+      }
+      return;
+    }
     final now = DateTime.now();
     final lastPaintAt = _lastCarPosePaintAt;
     if (lastPaintAt != null &&
-        now.difference(lastPaintAt).inMilliseconds < 28) {
+        now.difference(lastPaintAt).inMilliseconds < 16) {
+      _dbgThrottleSkipCount = (_dbgThrottleSkipCount ?? 0) + 1;
       return;
     }
+    _dbgPaintSkipCount = 0; // reset on actual paint
+    // ─────────────────────────────────────────────────────────────────
 
     _lastCarPosePaintAt = now;
     _carPosePaintInFlight = true;
+
+    // ── DEBUG LOG 3: actual paint timing ─────────────────────────────
+    final paintStart = DateTime.now().millisecondsSinceEpoch;
+    // ─────────────────────────────────────────────────────────────────
+
     try {
       await _setNavigationCarModelPose(position: position, bearing: bearing);
+
+      // ── DEBUG LOG 3 cont: how long did Mapbox take? ───────────────
+      final paintDuration = DateTime.now().millisecondsSinceEpoch - paintStart;
+      if (paintDuration > 20) {
+        debugPrint(
+          '🔴 MAPBOX-SLOW: setCarPose took ${paintDuration}ms — yahi freeze ka source!',
+        );
+      }
+      // ──────────────────────────────────────────────────────────────
     } finally {
       _carPosePaintInFlight = false;
     }
@@ -1173,14 +1259,43 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     try {
       final source =
           await map.style.getSource(_carModelSourceId) as mapbox.GeoJsonSource;
-      await source.updateGeoJSON(_carPointGeoJson(position));
+      // Dono ek saath — await mat karo pehli pe
+      await Future.wait<void>([
+        source.updateGeoJSON(_carPointGeoJson(position, bearing))!,
+        map.style.setStyleLayerProperty(_carModelLayerId, 'model-rotation', [
+          0.0,
+          0.0,
+          _carModelRotation(bearing),
+        ]),
+      ]);
+    } catch (e) {
+      debugPrint('Car model source missing, recreating: $e');
+      await _removeCarModelLayer();
+      await map.style.addSource(
+        mapbox.GeoJsonSource(
+          id: _carModelSourceId,
+          data: _carPointGeoJson(position, bearing),
+        ),
+      );
+      final layer = mapbox.ModelLayer(
+        id: _carModelLayerId,
+        sourceId: _carModelSourceId,
+        slot: 'top',
+        modelId: _carModelUri,
+        modelScale: const [_carModelScale, _carModelScale, _carModelScale],
+        modelType: mapbox.ModelType.COMMON_3D,
+        modelCastShadows: false,
+        modelReceiveShadows: false,
+        modelEmissiveStrength: 0.7,
+        modelOpacity: 1.0,
+      );
+      await map.style.addLayer(layer);
       await map.style.setStyleLayerProperty(
         _carModelLayerId,
         'model-rotation',
         [0.0, 0.0, _carModelRotation(bearing)],
       );
-    } catch (_) {
-      await _setupNavigationCarModel(position: position, bearing: bearing);
+      await _keepCarLayerAboveRoute();
     }
   }
 
@@ -1227,6 +1342,81 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             _haversine(previous[1], previous[0], current[1], current[0]),
       );
     }
+  }
+
+  void _reseedDisplayedCarForRoute(MapboxRouteResult route) {
+    final position = _displayCarPosition;
+    if (position == null || route.coordinates.length < 2) return;
+
+    final routeDistance = _nearestDisplayRouteDistance(route, position);
+    if (routeDistance == null) return;
+
+    _displayCarRouteDistance = routeDistance;
+    _carTargetRouteDistance = routeDistance;
+    _carTargetPosition = position;
+    _lastCarAnimationTickAt = DateTime.now();
+    _ensureCarAnimationLoop();
+  }
+
+  double? _nearestDisplayRouteDistance(
+    MapboxRouteResult route,
+    mapbox.Position position,
+  ) {
+    if (_displayRouteDistanceAtIndex.length != route.coordinates.length ||
+        route.coordinates.length < 2) {
+      return null;
+    }
+
+    double? bestDistanceMeters;
+    double? bestRouteDistance;
+    final posLat = position.lat.toDouble();
+    final posLng = position.lng.toDouble();
+
+    for (var i = 0; i < route.coordinates.length - 1; i++) {
+      final a = route.coordinates[i];
+      final b = route.coordinates[i + 1];
+      final midLatRad = ((a[1] + b[1]) / 2.0) * pi / 180.0;
+      final metersPerLng = 111320.0 * cos(midLatRad).abs().clamp(0.01, 1.0);
+      const metersPerLat = 111320.0;
+
+      final ax = a[0] * metersPerLng;
+      final ay = a[1] * metersPerLat;
+      final bx = b[0] * metersPerLng;
+      final by = b[1] * metersPerLat;
+      final px = posLng * metersPerLng;
+      final py = posLat * metersPerLat;
+
+      final dx = bx - ax;
+      final dy = by - ay;
+      final segmentLengthSquared = dx * dx + dy * dy;
+      final t =
+          segmentLengthSquared == 0
+              ? 0.0
+              : (((px - ax) * dx + (py - ay) * dy) / segmentLengthSquared)
+                  .clamp(0.0, 1.0)
+                  .toDouble();
+
+      final projectedLng = a[0] + (b[0] - a[0]) * t;
+      final projectedLat = a[1] + (b[1] - a[1]) * t;
+      final distanceMeters = _haversine(
+        posLat,
+        posLng,
+        projectedLat,
+        projectedLng,
+      );
+      final routeDistance =
+          _displayRouteDistanceAtIndex[i] +
+          (_displayRouteDistanceAtIndex[i + 1] -
+                  _displayRouteDistanceAtIndex[i]) *
+              t;
+
+      if (bestDistanceMeters == null || distanceMeters < bestDistanceMeters) {
+        bestDistanceMeters = distanceMeters;
+        bestRouteDistance = routeDistance;
+      }
+    }
+
+    return bestRouteDistance;
   }
 
   mapbox.Position? _positionAtRouteDistance(double distanceMeters) {
@@ -1291,6 +1481,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     required double speedMps,
   }) {
     if (currentDistance == null || desiredDistance == null) return null;
+    if (speedMps <= 0) return currentDistance;
 
     final gap = desiredDistance - currentDistance;
     if (gap <= 0) {
@@ -1320,6 +1511,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       desiredPosition,
     );
     if (distance < 0.05) return desiredPosition;
+    if (speedMps <= 0) return currentPosition;
 
     final cruiseSpeed = max(speedMps, 0.35);
     final catchUpSpeed = (cruiseSpeed + distance * 1.8).clamp(
@@ -1361,7 +1553,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     return (bearing + _carModelBearingOffset + 360.0) % 360.0;
   }
 
-  String _carPointGeoJson(mapbox.Position position) {
+  String _carPointGeoJson(mapbox.Position position, double bearing) {
     return jsonEncode({
       'type': 'Feature',
       'geometry': {
@@ -1371,7 +1563,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           position.lat + _carLatOffset,
         ],
       },
-      'properties': {},
+      'properties': {'bearing': _carModelRotation(bearing)},
     });
   }
 
