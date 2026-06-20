@@ -393,8 +393,16 @@ class MapboxNavigationService {
     }
 
     final delta = _shortestBearingDelta(_lastBearing, normalizedTarget);
-    final maxStep = delta.abs() > 120 ? 18.0 : 32.0;
-    final smoothedDelta = (delta * 0.28).clamp(-maxStep, maxStep).toDouble();
+
+    // FIX (Issue #2 & #3): sharp turn = BADA max step (fast catch-up),
+    // chhota delta (straight road GPS jitter) = chhota max step (smooth).
+    // Pehle yeh ulta tha — sharp turns sabse zyada throttle ho rahe the.
+    final isSharpTurn = delta.abs() > 45;
+    final maxStep = isSharpTurn ? 45.0 : 20.0;
+    final smoothFactor = isSharpTurn ? 0.55 : 0.3;
+
+    final smoothedDelta =
+        (delta * smoothFactor).clamp(-maxStep, maxStep).toDouble();
     _lastBearing = _normalizeBearing(_lastBearing + smoothedDelta);
     return _lastBearing;
   }

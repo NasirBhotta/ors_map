@@ -76,6 +76,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   mapbox.Position? _carTargetPosition;
   double _carTargetBearing = 0.0;
   double _carTargetSpeedMps = 0.0;
+  double _smoothedCarSpeedMps = 0.0;
   double? _displayCarRouteDistance;
   double? _carTargetRouteDistance;
   DateTime? _carTargetAt;
@@ -592,21 +593,27 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _recenterTimer = null;
 
     final current = _currentPosition;
-    var routeStart =
+    final originalRouteStart =
         route.coordinates.isNotEmpty
             ? mapbox.Position(
               route.coordinates.first[0],
               route.coordinates.first[1],
             )
             : null;
-    final distanceFromRouteStart =
-        current != null && routeStart != null
-            ? _distanceBetweenPositions(current, routeStart)
-            : 0.0;
+
+    // FIX: decision ek baar yahan lock — reroute ke baad iska re-check nahi hota.
+    // Pehle bug: naya route current GPS se fetch hota hai, to uska start point
+    // bhi current ke bahut paas hota hai → dusri baar check karne par snap=true
+    // ban jaata tha, even though originally user >5m door tha.
+    final bool shouldSnapToRouteStart =
+        current != null &&
+        originalRouteStart != null &&
+        _distanceBetweenPositions(current, originalRouteStart) <=
+            _routeStartSnapMeters;
 
     if (current != null &&
-        routeStart != null &&
-        distanceFromRouteStart > _routeStartSnapMeters) {
+        originalRouteStart != null &&
+        !shouldSnapToRouteStart) {
       final provisionalBearing = _initialRouteBearing(route);
       await _setupNavigationCarModel(
         position: current,
@@ -636,10 +643,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
       if (freshRoute != null && freshRoute.coordinates.length >= 2) {
         route = freshRoute;
-        routeStart = mapbox.Position(
-          freshRoute.coordinates.first[0],
-          freshRoute.coordinates.first[1],
-        );
+        // NOTE: routeStart ab dobara assign NAHI karna — yehi to bug tha.
         final drawing = MapboxDrawingService(mapboxMap: map);
         await drawing.drawRoute(freshRoute);
         await _keepCarLayerAboveRoute();
@@ -655,12 +659,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     _buildDisplayRouteMetrics(route);
     final initialBearing = _initialRouteBearing(route);
-    final shouldSnapToRouteStart =
-        current == null ||
-        routeStart == null ||
-        _distanceBetweenPositions(current, routeStart) <= _routeStartSnapMeters;
+
+    // FIX: startPosition sirf upar wale locked decision se aata hai —
+    // kabhi bhi fresh route ke coordinate se overwrite nahi hota.
     final startPosition =
-        shouldSnapToRouteStart ? (routeStart ?? current) : current;
+        shouldSnapToRouteStart ? (originalRouteStart ?? current) : current;
 
     if (route.steps.isNotEmpty) {
       _safeSpeak(route.steps.first.instruction);
@@ -986,6 +989,11 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       }
     }
     _carTargetSpeedMps = effectiveSpeedMps.clamp(0.0, 55.0).toDouble();
+    _smoothedCarSpeedMps =
+        _smoothedCarSpeedMps == 0
+            ? _carTargetSpeedMps
+            : _smoothedCarSpeedMps +
+                (_carTargetSpeedMps - _smoothedCarSpeedMps) * 0.35;
     _carTargetRouteDistance = targetRouteDistance;
     if (_displayCarRouteDistance == null && targetRouteDistance != null) {
       _displayCarRouteDistance = targetRouteDistance;
@@ -1023,10 +1031,13 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         _carTargetAt == null
             ? 0.0
             : now.difference(_carTargetAt!).inMilliseconds / 1000.0;
+    final speedMps = max(_smoothedCarSpeedMps, _carTargetSpeedMps);
     final predictionMeters =
-        _carTargetSpeedMps < 0.7
+        speedMps < 0.7
             ? 0.0
-            : (_carTargetSpeedMps * targetAgeSeconds).clamp(0.0, 24.0);
+            : (speedMps * (targetAgeSeconds + 0.45))
+                .clamp(0.0, max(10.0, speedMps * 4.0))
+                .toDouble();
     final desiredRouteDistance =
         _carTargetRouteDistance == null
             ? null
@@ -1044,29 +1055,25 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     final currentPosition = _displayCarPosition ?? desiredPosition;
     final currentBearing = _displayCarBearing ?? _carTargetBearing;
-    final distance = _distanceBetweenPositions(
-      currentPosition,
-      desiredPosition,
-    );
-    final minStep = _carTargetSpeedMps > 0.7 ? 0.18 : 0.08;
-    final maxStep = max(
-      minStep,
-      max(_carTargetSpeedMps * dtSeconds * 1.7, distance * 0.22),
-    );
-    final moveT = distance <= maxStep ? 1.0 : maxStep / max(distance, 0.001);
     final currentRouteDistance = _displayCarRouteDistance;
-    final nextRouteDistance =
-        desiredRouteDistance != null && currentRouteDistance != null
-            ? currentRouteDistance +
-                (desiredRouteDistance - currentRouteDistance) * moveT
-            : null;
+    final nextRouteDistance = _nextDisplayedRouteDistance(
+      currentDistance: currentRouteDistance,
+      desiredDistance: desiredRouteDistance,
+      dtSeconds: dtSeconds,
+      speedMps: speedMps,
+    );
     final nextRoutePosition =
         nextRouteDistance == null
             ? null
             : _positionAtRouteDistance(nextRouteDistance);
     final nextPosition =
         nextRoutePosition ??
-        _lerpPosition(currentPosition, desiredPosition, moveT);
+        _nextFreeDrivePosition(
+          currentPosition: currentPosition,
+          desiredPosition: desiredPosition,
+          dtSeconds: dtSeconds,
+          speedMps: speedMps,
+        );
     final bearingT = min(1.0, dtSeconds * 4.5);
     final nextBearing = _lerpBearing(
       currentBearing,
@@ -1089,6 +1096,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _carTargetPosition = null;
     _carTargetBearing = 0.0;
     _carTargetSpeedMps = 0.0;
+    _smoothedCarSpeedMps = 0.0;
     _displayCarRouteDistance = null;
     _carTargetRouteDistance = null;
     _carTargetAt = null;
@@ -1285,6 +1293,52 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     } finally {
       _routeProgressPaintInFlight = false;
     }
+  }
+
+  double? _nextDisplayedRouteDistance({
+    required double? currentDistance,
+    required double? desiredDistance,
+    required double dtSeconds,
+    required double speedMps,
+  }) {
+    if (currentDistance == null || desiredDistance == null) return null;
+
+    final gap = desiredDistance - currentDistance;
+    if (gap <= 0) {
+      if (gap.abs() < 8.0) return currentDistance;
+      return currentDistance + gap * min(1.0, dtSeconds * 1.2);
+    }
+
+    final cruiseSpeed = max(speedMps, 0.35);
+    final catchUpSpeed = (cruiseSpeed + gap * 1.8).clamp(
+      cruiseSpeed,
+      max(cruiseSpeed * 2.4, cruiseSpeed + 8.0),
+    );
+    return (currentDistance + min(gap, catchUpSpeed * dtSeconds)).clamp(
+      0.0,
+      _displayRouteLength,
+    );
+  }
+
+  mapbox.Position _nextFreeDrivePosition({
+    required mapbox.Position currentPosition,
+    required mapbox.Position desiredPosition,
+    required double dtSeconds,
+    required double speedMps,
+  }) {
+    final distance = _distanceBetweenPositions(
+      currentPosition,
+      desiredPosition,
+    );
+    if (distance < 0.05) return desiredPosition;
+
+    final cruiseSpeed = max(speedMps, 0.35);
+    final catchUpSpeed = (cruiseSpeed + distance * 1.8).clamp(
+      cruiseSpeed,
+      max(cruiseSpeed * 2.4, cruiseSpeed + 8.0),
+    );
+    final step = min(distance, catchUpSpeed * dtSeconds);
+    return _lerpPosition(currentPosition, desiredPosition, step / distance);
   }
 
   mapbox.Position _offsetPosition(
