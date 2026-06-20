@@ -70,17 +70,25 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   String? _searchError;
   int _searchRequestId = 0;
   Timer? _recenterTimer;
+
   Timer? _carAnimationTimer;
   mapbox.Position? _displayCarPosition;
   double? _displayCarBearing;
+  double? _displayCarRouteDistance;
+
+  // Tween anchor: jahan se yeh animation segment shuru hua, aur jahan
+  // jaana hai (latest GPS fix). Har naye fix par fresh tween shuru hota
+  // hai, jiski duration = asli gap jo pichle aur naye fix ke beech laga.
+  mapbox.Position? _carAnimStartPosition;
+  double? _carAnimStartBearing;
+  double? _carAnimStartRouteDistance;
   mapbox.Position? _carTargetPosition;
   double _carTargetBearing = 0.0;
-  double _carTargetSpeedMps = 0.0;
-  double _smoothedCarSpeedMps = 0.0;
-  double? _displayCarRouteDistance;
   double? _carTargetRouteDistance;
-  DateTime? _carTargetAt;
-  DateTime? _lastCarFrameAt;
+  DateTime? _carAnimStartAt;
+  int _carAnimDurationMs = 700;
+  DateTime? _lastLocationUpdateAt;
+
   DateTime? _lastCarPosePaintAt;
   bool _carPosePaintInFlight = false;
   DateTime? _lastCameraFollowAt;
@@ -713,6 +721,9 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           _mapBearing = bearing;
         });
       },
+      onUpcomingInstruction: (stepIndex, step) {
+        _safeSpeak(step.instruction);
+      },
       onStepChanged: (index, step) {
         setState(() {
           _currentInstruction = step.instruction;
@@ -728,7 +739,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           'instruction': step.instruction,
           'distance': _remainingDistanceText,
         });
-        _safeSpeak(step.instruction);
       },
       onReroute: (msg) {
         setState(() => _currentInstruction = msg);
@@ -930,11 +940,15 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     await _keepCarLayerAboveRoute();
     _displayCarPosition = position;
     _displayCarBearing = bearing;
+    _carAnimStartPosition = position;
+    _carAnimStartBearing = bearing;
+    _carAnimStartRouteDistance = _displayCarRouteDistance;
     _carTargetPosition = position;
     _carTargetBearing = bearing;
-    _carTargetSpeedMps = 0;
-    _carTargetAt = DateTime.now();
-    _lastCarFrameAt = null;
+    _carTargetRouteDistance = _displayCarRouteDistance;
+    _carAnimStartAt = DateTime.now();
+    _carAnimDurationMs = 700;
+    _lastLocationUpdateAt = null;
   }
 
   Future<void> _keepCarLayerAboveRoute() async {
@@ -958,48 +972,45 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     if (!_isNavigating) return;
 
     final now = DateTime.now();
+
+    // Bahut bada jump (reroute / GPS warm-up) -> seedha snap, tween nahi.
     final currentPosition = _displayCarPosition;
-    final distance =
+    final jumpDistance =
         currentPosition == null
             ? 0.0
             : _distanceBetweenPositions(currentPosition, targetPosition);
-
-    if (currentPosition == null || distance > 80) {
+    if (currentPosition == null || jumpDistance > 80) {
       _displayCarPosition = targetPosition;
       _displayCarBearing = targetBearing;
+      _displayCarRouteDistance = targetRouteDistance;
       await _setNavigationCarModelPose(
         position: targetPosition,
         bearing: targetBearing,
       );
     }
 
+    // FIX: duration = ASLI time jo pichle fix se laga (clamp ke saath),
+    // koi speed-guess nahi. Yehi cheez "chal-ruk-chal" wala bug fix karti
+    // hai — purana code speed se predict karta tha aur ek ceiling pe
+    // freeze ho jaata tha.
+    final previousUpdateAt = _lastLocationUpdateAt;
+    final rawIntervalMs =
+        previousUpdateAt == null
+            ? 700
+            : now.difference(previousUpdateAt).inMilliseconds;
+    _carAnimDurationMs = rawIntervalMs.clamp(180, 1500);
+    _lastLocationUpdateAt = now;
+
+    _carAnimStartPosition = _displayCarPosition ?? targetPosition;
+    _carAnimStartBearing = _displayCarBearing ?? targetBearing;
+    _carAnimStartRouteDistance =
+        _displayCarRouteDistance ?? targetRouteDistance;
+    _carAnimStartAt = now;
+
     _carTargetPosition = targetPosition;
     _carTargetBearing = targetBearing;
-    final previousRouteTarget = _carTargetRouteDistance;
-    final previousTargetAt = _carTargetAt;
-    var effectiveSpeedMps = speedMps;
-    if (targetRouteDistance != null &&
-        previousRouteTarget != null &&
-        previousTargetAt != null) {
-      final elapsedSeconds =
-          now.difference(previousTargetAt).inMilliseconds / 1000.0;
-      final routeDelta = targetRouteDistance - previousRouteTarget;
-      if (elapsedSeconds > 0 && routeDelta > 0) {
-        effectiveSpeedMps = max(effectiveSpeedMps, routeDelta / elapsedSeconds);
-      }
-    }
-    _carTargetSpeedMps = effectiveSpeedMps.clamp(0.0, 55.0).toDouble();
-    _smoothedCarSpeedMps =
-        _smoothedCarSpeedMps == 0
-            ? _carTargetSpeedMps
-            : _smoothedCarSpeedMps +
-                (_carTargetSpeedMps - _smoothedCarSpeedMps) * 0.35;
     _carTargetRouteDistance = targetRouteDistance;
-    if (_displayCarRouteDistance == null && targetRouteDistance != null) {
-      _displayCarRouteDistance = targetRouteDistance;
-    }
-    _carTargetAt = now;
-    _lastCarFrameAt ??= now;
+
     _ensureCarAnimationLoop();
   }
 
@@ -1019,71 +1030,47 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     }
 
     final target = _carTargetPosition;
-    if (target == null) return;
+    final startAt = _carAnimStartAt;
+    if (target == null || startAt == null) return;
 
     final now = DateTime.now();
-    final previousFrameAt = _lastCarFrameAt ?? now;
-    final dtSeconds =
-        now.difference(previousFrameAt).inMilliseconds.clamp(1, 80) / 1000.0;
-    _lastCarFrameAt = now;
+    final elapsedMs = now.difference(startAt).inMilliseconds;
+    // FIX: linear t — eased curves per-segment baar baar restart hone se
+    // "decel-accel-decel" wali pulsing feel deti hain. Linear = ek jaisi
+    // constant-speed glide, jo asli driving jaisa lagta hai.
+    final t =
+        _carAnimDurationMs <= 0
+            ? 1.0
+            : (elapsedMs / _carAnimDurationMs).clamp(0.0, 1.0).toDouble();
 
-    final targetAgeSeconds =
-        _carTargetAt == null
-            ? 0.0
-            : now.difference(_carTargetAt!).inMilliseconds / 1000.0;
-    final speedMps = max(_smoothedCarSpeedMps, _carTargetSpeedMps);
-    final predictionMeters =
-        speedMps < 0.7
-            ? 0.0
-            : (speedMps * (targetAgeSeconds + 0.45))
-                .clamp(0.0, max(10.0, speedMps * 4.0))
-                .toDouble();
-    final desiredRouteDistance =
-        _carTargetRouteDistance == null
-            ? null
-            : (_carTargetRouteDistance! + predictionMeters).clamp(
-              0.0,
-              _displayRouteLength,
-            );
-    final desiredRoutePosition =
-        desiredRouteDistance == null
-            ? null
-            : _positionAtRouteDistance(desiredRouteDistance);
-    final desiredPosition =
-        desiredRoutePosition ??
-        _offsetPosition(target, _carTargetBearing, predictionMeters);
-
-    final currentPosition = _displayCarPosition ?? desiredPosition;
-    final currentBearing = _displayCarBearing ?? _carTargetBearing;
-    final currentRouteDistance = _displayCarRouteDistance;
-    final nextRouteDistance = _nextDisplayedRouteDistance(
-      currentDistance: currentRouteDistance,
-      desiredDistance: desiredRouteDistance,
-      dtSeconds: dtSeconds,
-      speedMps: speedMps,
-    );
-    final nextRoutePosition =
+    final startRouteDistance = _carAnimStartRouteDistance;
+    final targetRouteDistance = _carTargetRouteDistance;
+    final nextRouteDistance =
+        startRouteDistance != null && targetRouteDistance != null
+            ? startRouteDistance +
+                (targetRouteDistance - startRouteDistance) * t
+            : null;
+    // Route-distance se position nikalna behtar hai kyunki yeh road ke
+    // curve ko follow karta hai — seedhi lerp nahi, jo corners cut kar
+    // deti hai.
+    final routePosition =
         nextRouteDistance == null
             ? null
             : _positionAtRouteDistance(nextRouteDistance);
+
     final nextPosition =
-        nextRoutePosition ??
-        _nextFreeDrivePosition(
-          currentPosition: currentPosition,
-          desiredPosition: desiredPosition,
-          dtSeconds: dtSeconds,
-          speedMps: speedMps,
-        );
-    final bearingT = min(1.0, dtSeconds * 4.5);
+        routePosition ??
+        _lerpPosition(_carAnimStartPosition ?? target, target, t);
     final nextBearing = _lerpBearing(
-      currentBearing,
+      _carAnimStartBearing ?? _carTargetBearing,
       _carTargetBearing,
-      Curves.easeOut.transform(bearingT),
+      t,
     );
 
     _displayCarPosition = nextPosition;
     _displayCarBearing = nextBearing;
     _displayCarRouteDistance = nextRouteDistance;
+
     unawaited(_paintDisplayedCarPose(nextPosition, nextBearing));
     unawaited(_followDisplayedCarCamera(nextPosition, nextBearing));
     unawaited(_paintDisplayedRouteProgress());
@@ -1093,14 +1080,16 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _carAnimationTimer = null;
     _displayCarPosition = null;
     _displayCarBearing = null;
+    _displayCarRouteDistance = null;
+    _carAnimStartPosition = null;
+    _carAnimStartBearing = null;
+    _carAnimStartRouteDistance = null;
     _carTargetPosition = null;
     _carTargetBearing = 0.0;
-    _carTargetSpeedMps = 0.0;
-    _smoothedCarSpeedMps = 0.0;
-    _displayCarRouteDistance = null;
     _carTargetRouteDistance = null;
-    _carTargetAt = null;
-    _lastCarFrameAt = null;
+    _carAnimStartAt = null;
+    _carAnimDurationMs = 700;
+    _lastLocationUpdateAt = null;
     _lastCarPosePaintAt = null;
     _carPosePaintInFlight = false;
     _lastCameraFollowAt = null;

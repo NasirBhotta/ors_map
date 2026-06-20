@@ -16,7 +16,8 @@ class MapboxNavigationService {
 
   final List<double> _routeDistanceAtIndex = [];
   final List<int> _stepEndIndices = [];
-
+  static const _voiceLeadSeconds = 4.0;
+  int _lastAnnouncedStepIndex = -1;
   int _currentStepIndex = 0;
   int _lastRouteIndex = 0;
   int _offRouteCount = 0;
@@ -26,11 +27,10 @@ class MapboxNavigationService {
   bool _isRerouting = false;
   DateTime? _startTime;
   geolocator.Position? _lastPosition;
-  mapbox.Position? _lastVisualPosition;
 
   static const _offRouteMeters = 80.0;
   static const _stepAdvanceMeters = 35.0;
-  static const _lookAheadMeters = 45.0;
+  static const _lookAheadMeters = 5.0;
   static const _maxBackwardSnapMeters = 25.0;
   static const _minForwardSnapWindowMeters = 90.0;
 
@@ -45,6 +45,7 @@ class MapboxNavigationService {
   )?
   onLocationUpdate;
   final void Function(int stepIndex, MapboxStep step)? onStepChanged;
+  final void Function(int stepIndex, MapboxStep step)? onUpcomingInstruction;
   final void Function(String message)? onReroute;
   final Future<void> Function(MapboxRouteResult route)? onRouteChanged;
   final Future<void> Function(
@@ -65,6 +66,7 @@ class MapboxNavigationService {
     this.onRouteChanged,
     this.onRouteProgress,
     this.onDestinationReached,
+    this.onUpcomingInstruction,
   });
 
   void startNavigation({
@@ -100,7 +102,7 @@ class MapboxNavigationService {
     _isRerouting = false;
     _startTime = null;
     _lastPosition = null;
-    _lastVisualPosition = null;
+    _lastAnnouncedStepIndex = -1;
   }
 
   void setFollowModeEnabled(bool enabled) {}
@@ -111,6 +113,7 @@ class MapboxNavigationService {
     _lastRouteIndex = 0;
     _offRouteCount = 0;
     _lastRouteDistanceMeters = 0;
+    _lastAnnouncedStepIndex = -1;
     _buildRouteMetrics(route);
   }
 
@@ -285,6 +288,23 @@ class MapboxNavigationService {
       endCoord[0],
     );
 
+    // FIX: awaaz turn se PEHLE shuru honi chahiye, baad mein nahi. Speed
+    // ke hisaab se itna pehle bolo ke 4 second ka buffer mil jaye —
+    // fixed 35m sirf slow speed pe kaafi tha, tez raftar mein bohot kam
+    // tha.
+    final nextStepIndex = _currentStepIndex + 1;
+    final speedMps = max(position.speed, 3.0);
+    final announceLeadMeters = max(
+      _stepAdvanceMeters,
+      speedMps * _voiceLeadSeconds,
+    );
+
+    if (_lastAnnouncedStepIndex != nextStepIndex &&
+        distanceToStepEnd <= announceLeadMeters) {
+      _lastAnnouncedStepIndex = nextStepIndex;
+      onUpcomingInstruction?.call(nextStepIndex, route.steps[nextStepIndex]);
+    }
+
     if (snap.closestRouteIndex >= stepEndIndex ||
         distanceToStepEnd < _stepAdvanceMeters) {
       _currentStepIndex++;
@@ -350,60 +370,25 @@ class MapboxNavigationService {
     geolocator.Position position,
     _RouteSnap? snap,
   ) {
-    final target =
-        snap != null &&
-                snap.distanceMeters <=
-                    max(_offRouteMeters, position.accuracy * 2.5)
-            ? mapbox.Position(snap.snappedLng, snap.snappedLat)
-            : mapbox.Position(position.longitude, position.latitude);
-    final previous = _lastVisualPosition;
-    if (previous == null) {
-      _lastVisualPosition = target;
-      return target;
+    // FIX: no EMA blending here either — same reasoning as bearing above.
+    // The screen's tween already handles smooth motion; smoothing the
+    // position here too just adds lag on top of lag.
+    if (snap != null &&
+        snap.distanceMeters <= max(_offRouteMeters, position.accuracy * 2.5)) {
+      return mapbox.Position(snap.snappedLng, snap.snappedLat);
     }
-
-    final distance = _haversine(
-      previous.lat.toDouble(),
-      previous.lng.toDouble(),
-      target.lat.toDouble(),
-      target.lng.toDouble(),
-    );
-    if (distance > 60) {
-      _lastVisualPosition = target;
-      return target;
-    }
-
-    final factor = position.speed > 2.0 ? 0.45 : 0.3;
-    final smoothed = mapbox.Position(
-      previous.lng.toDouble() +
-          (target.lng.toDouble() - previous.lng.toDouble()) * factor,
-      previous.lat.toDouble() +
-          (target.lat.toDouble() - previous.lat.toDouble()) * factor,
-    );
-    _lastVisualPosition = smoothed;
-    return smoothed;
+    return mapbox.Position(position.longitude, position.latitude);
   }
 
   double _acceptBearing(double targetBearing) {
-    final normalizedTarget = _normalizeBearing(targetBearing);
-    if (!_hasBearing) {
-      _hasBearing = true;
-      _lastBearing = normalizedTarget;
-      return _lastBearing;
-    }
-
-    final delta = _shortestBearingDelta(_lastBearing, normalizedTarget);
-
-    // FIX (Issue #2 & #3): sharp turn = BADA max step (fast catch-up),
-    // chhota delta (straight road GPS jitter) = chhota max step (smooth).
-    // Pehle yeh ulta tha — sharp turns sabse zyada throttle ho rahe the.
-    final isSharpTurn = delta.abs() > 45;
-    final maxStep = isSharpTurn ? 45.0 : 20.0;
-    final smoothFactor = isSharpTurn ? 0.55 : 0.3;
-
-    final smoothedDelta =
-        (delta * smoothFactor).clamp(-maxStep, maxStep).toDouble();
-    _lastBearing = _normalizeBearing(_lastBearing + smoothedDelta);
+    // FIX: no per-update damping here anymore. Route-segment bearing is
+    // already stable (it comes from route geometry + lookahead, not raw
+    // noisy GPS heading), so just pass it through as-is. ALL visual
+    // smoothing now happens once, on the screen side (the 60fps tween).
+    // Smoothing it here too was the "double chashni" bug — it made turns
+    // feel sluggish because two dampers were stacked back to back.
+    _hasBearing = true;
+    _lastBearing = _normalizeBearing(targetBearing);
     return _lastBearing;
   }
 
