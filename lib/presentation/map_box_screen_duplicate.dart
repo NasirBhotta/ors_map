@@ -30,7 +30,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const String _carModelLayerId = 'navigation-car-model-layer';
   static const String _carModelUri = 'asset://assets/lowpoly_car.glb';
   static const double _carModelBearingOffset = 180.0;
-  static const double _carModelScale = 2.0;
+  static const double _carModelScale = 3;
+
   static const Color _accentBlue = Color(0xFF2563EB);
   static const Color _successGreen = Color(0xFF16A34A);
   static const Color _warningAmber = Color(0xFFFACC15);
@@ -38,14 +39,14 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const Color _mutedInk = Color(0xFF64748B);
   static const Color _panelBorder = Color(0xFFE2E8F0);
   static const double _panelRadius = 8.0;
-
+  static const double _navigationZoomLevel = 19.3;
   int? _dbgLastTickMs;
   int? _dbgPaintSkipCount;
   int? _dbgThrottleSkipCount;
 
   mapbox.MapboxMap? _mapboxMap;
   mapbox.Position? _currentPosition;
-
+  bool _suppressFollowCamera = false;
   MapboxRouteResult? _activeRoute;
   mapbox.Position? _activeDestination;
 
@@ -63,8 +64,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   bool _showingRouteOverview = false;
   mapbox.PointAnnotationManager? _annotationManager;
   mapbox.PointAnnotation? _destinationMarker;
-  static const double _carLngOffset = 0.000000;
-  static const double _carLatOffset = 0.000009;
   static const double _routeStartSnapMeters = 5.0;
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
@@ -460,15 +459,21 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final map = _mapboxMap;
     if (!_isNavigating || current == null || map == null) return;
 
+    _suppressFollowCamera = true; // ← add
     _navService?.setFollowModeEnabled(true);
-    await map.flyTo(
-      _navigationCamera(
-        lat: current.lat.toDouble(),
-        lng: current.lng.toDouble(),
-        bearing: _mapBearing,
-      ),
-      mapbox.MapAnimationOptions(duration: 550),
-    );
+    try {
+      await map.flyTo(
+        _navigationCamera(
+          lat: current.lat.toDouble(),
+          lng: current.lng.toDouble(),
+          bearing: _mapBearing,
+        ),
+        mapbox.MapAnimationOptions(duration: 550),
+      );
+      await _setCarModelFlatScale(_carModelScale);
+    } finally {
+      _suppressFollowCamera = false; // ← add
+    }
 
     if (mounted) {
       setState(() {
@@ -487,36 +492,52 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     _recenterTimer?.cancel();
     _recenterTimer = null;
+    _suppressFollowCamera = true; // ← turant follow-loop band karo
 
-    if (!_showingRouteOverview) {
-      _navService?.setFollowModeEnabled(false);
-      final drawing = MapboxDrawingService(mapboxMap: map);
-      await drawing.fitRouteBounds(
-        fromLng: current.lng.toDouble(),
-        fromLat: current.lat.toDouble(),
-        toLng: dest.lng.toDouble(),
-        toLat: dest.lat.toDouble(),
-      );
-      if (!mounted) return;
-      setState(() {
-        _showingRouteOverview = true;
-        _isFollowingCamera = false;
-      });
-    } else {
-      _navService?.setFollowModeEnabled(true);
-      await map.flyTo(
-        _navigationCamera(
-          lat: current.lat.toDouble(),
-          lng: current.lng.toDouble(),
-          bearing: _mapBearing,
-        ),
-        mapbox.MapAnimationOptions(duration: 800),
-      );
-      if (!mounted) return;
-      setState(() {
-        _showingRouteOverview = false;
-        _isFollowingCamera = true;
-      });
+    try {
+      if (!_showingRouteOverview) {
+        _navService?.setFollowModeEnabled(false);
+        final drawing = MapboxDrawingService(mapboxMap: map);
+
+        final overviewCamera = await drawing.computeOverviewCamera(
+          fromLng: current.lng.toDouble(),
+          fromLat: current.lat.toDouble(),
+          toLng: dest.lng.toDouble(),
+          toLat: dest.lat.toDouble(),
+        );
+        final overviewZoom = overviewCamera.zoom ?? 14.0;
+
+        await map.flyTo(
+          overviewCamera,
+          mapbox.MapAnimationOptions(duration: 1500),
+        );
+        await _applyCarModelOverviewScaleExpression(overviewZoom);
+        if (!mounted) return;
+        setState(() {
+          _showingRouteOverview = true;
+          _isFollowingCamera = false;
+        });
+      } else {
+        _navService?.setFollowModeEnabled(true);
+        await map.flyTo(
+          _navigationCamera(
+            lat: current.lat.toDouble(),
+            lng: current.lng.toDouble(),
+            bearing: _mapBearing,
+          ),
+          mapbox.MapAnimationOptions(duration: 800),
+        );
+        await _setCarModelFlatScale(_carModelScale);
+
+        if (!mounted) return;
+        setState(() {
+          _showingRouteOverview = false;
+          _isFollowingCamera = true;
+        });
+      }
+    } finally {
+      _suppressFollowCamera =
+          false; // ← transition khatam, follow-loop wapas chalne do
     }
   }
 
@@ -852,8 +873,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }) {
     return mapbox.CameraOptions(
       center: mapbox.Point(coordinates: mapbox.Position(lng, lat)),
-      zoom: 20,
-      pitch: 75.0,
+      zoom: 19.3,
+      pitch: 80.0,
       bearing: bearing,
       padding: mapbox.MbxEdgeInsets(top: 80, left: 0, bottom: 300, right: 0),
     );
@@ -963,6 +984,54 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         _carModelLayerId,
         mapbox.LayerPosition(above: 'route-layer'),
       );
+    } catch (_) {}
+  }
+
+  Future<void> _applyCarModelOverviewScaleExpression(
+    double overviewZoom,
+  ) async {
+    await Future.delayed(Duration(milliseconds: 500));
+    final map = _mapboxMap;
+    if (map == null) return;
+    if (overviewZoom >= _navigationZoomLevel) {
+      await _setCarModelFlatScale(_carModelScale);
+      return;
+    }
+
+    final compensation = pow(2, _navigationZoomLevel - overviewZoom).toDouble();
+    final overviewScale =
+        (_carModelScale * compensation)
+            .clamp(_carModelScale, _carModelScale * 50.0)
+            .toDouble();
+
+    try {
+      await map.style.setStyleLayerProperty(_carModelLayerId, 'model-scale', [
+        'interpolate',
+        ['linear'],
+        ['zoom'],
+        overviewZoom,
+        [
+          'literal',
+          [overviewScale, overviewScale, overviewScale],
+        ],
+        _navigationZoomLevel,
+        [
+          'literal',
+          [_carModelScale, _carModelScale, _carModelScale],
+        ],
+      ]);
+    } catch (_) {}
+  }
+
+  Future<void> _setCarModelFlatScale(double scale) async {
+    final map = _mapboxMap;
+    if (map == null) return;
+    try {
+      await map.style.setStyleLayerProperty(_carModelLayerId, 'model-scale', [
+        scale,
+        scale,
+        scale,
+      ]);
     } catch (_) {}
   }
 
@@ -1157,6 +1226,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _cameraFollowInFlight = false;
     _lastRouteProgressPaintAt = null;
     _routeProgressPaintInFlight = false;
+    _suppressFollowCamera = false;
   }
 
   Future<void> _paintDisplayedCarPose(
@@ -1214,6 +1284,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     if (map == null ||
         !_isNavigating ||
         !_isFollowingCamera ||
+        _suppressFollowCamera ||
         _showingRouteOverview ||
         _cameraFollowInFlight) {
       return;
@@ -1232,13 +1303,13 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       await map.easeTo(
         mapbox.CameraOptions(
           center: mapbox.Point(coordinates: position),
-          zoom: 18.7,
-          pitch: 72.0,
+          zoom: 19.3,
+          pitch: 80.0,
           bearing: bearing,
           padding: mapbox.MbxEdgeInsets(
             top: 80,
             left: 0,
-            bottom: 300,
+            bottom: 340,
             right: 0,
           ),
         ),
@@ -1558,10 +1629,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       'type': 'Feature',
       'geometry': {
         'type': 'Point',
-        'coordinates': [
-          position.lng + _carLngOffset,
-          position.lat + _carLatOffset,
-        ],
+        'coordinates': [position.lng, position.lat],
       },
       'properties': {'bearing': _carModelRotation(bearing)},
     });

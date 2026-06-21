@@ -44,6 +44,19 @@ class MapboxDrawingService {
         lineJoin: mapbox.LineJoin.ROUND,
         lineZOffset: 0.0,
         lineDepthOcclusionFactor: 1.0,
+        lineWidthExpression: [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          10,
+          4.7,
+          15,
+          9.3,
+          18,
+          14.0,
+          20,
+          17.1,
+        ],
       ),
       belowLayerId: belowLayerId,
     );
@@ -59,6 +72,19 @@ class MapboxDrawingService {
         lineJoin: mapbox.LineJoin.ROUND,
         lineZOffset: 0.0,
         lineDepthOcclusionFactor: 1.0,
+        lineWidthExpression: [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          10,
+          3.3,
+          15,
+          6.7,
+          18,
+          10.0,
+          20,
+          12.2,
+        ],
       ),
       belowLayerId: belowLayerId,
     );
@@ -74,6 +100,19 @@ class MapboxDrawingService {
         lineJoin: mapbox.LineJoin.ROUND,
         lineZOffset: 0.0,
         lineDepthOcclusionFactor: 1.0,
+        lineWidthExpression: [
+          'interpolate',
+          ['linear'],
+          ['zoom'],
+          10,
+          3.0,
+          15,
+          6.0,
+          18,
+          9.0,
+          20,
+          11.0,
+        ],
       ),
       belowLayerId: belowLayerId,
     );
@@ -162,7 +201,7 @@ class MapboxDrawingService {
     }
   }
 
-  Future<void> fitRouteBounds({
+  Future<double> fitRouteBounds({
     required double fromLng,
     required double fromLat,
     required double toLng,
@@ -187,12 +226,14 @@ class MapboxDrawingService {
     final camera = await mapboxMap.cameraForCoordinateBounds(
       bounds,
       mapbox.MbxEdgeInsets(top: 100, left: 50, bottom: 250, right: 50),
-      null,
-      null,
+      0.0, // bearing — north-up
+      0.0,
       null,
       null,
     );
     await mapboxMap.flyTo(camera, mapbox.MapAnimationOptions(duration: 1500));
+
+    return camera.zoom ?? 14.0;
   }
 
   String _lineGeoJson(List<List<double>> coordinates) {
@@ -204,6 +245,38 @@ class MapboxDrawingService {
       },
       'properties': {},
     });
+  }
+
+  Future<mapbox.CameraOptions> computeOverviewCamera({
+    required double fromLng,
+    required double fromLat,
+    required double toLng,
+    required double toLat,
+  }) async {
+    final bounds = mapbox.CoordinateBounds(
+      southwest: mapbox.Point(
+        coordinates: mapbox.Position(
+          fromLng < toLng ? fromLng : toLng,
+          fromLat < toLat ? fromLat : toLat,
+        ),
+      ),
+      northeast: mapbox.Point(
+        coordinates: mapbox.Position(
+          fromLng > toLng ? fromLng : toLng,
+          fromLat > toLat ? fromLat : toLat,
+        ),
+      ),
+      infiniteBounds: false,
+    );
+
+    return await mapboxMap.cameraForCoordinateBounds(
+      bounds,
+      mapbox.MbxEdgeInsets(top: 100, left: 50, bottom: 250, right: 50),
+      0.0,
+      0.0,
+      null,
+      null,
+    );
   }
 
   _RouteSplit _splitRouteAtDistance(
