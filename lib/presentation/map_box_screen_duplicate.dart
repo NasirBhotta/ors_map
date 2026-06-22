@@ -30,7 +30,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   static const String _carModelLayerId = 'navigation-car-model-layer';
   static const String _carModelUri = 'asset://assets/lowpoly_car.glb';
   static const double _carModelBearingOffset = 180.0;
-  static const double _carModelScale = 3;
+  static const double _carModelScale = 0.05; //3 for lambo
+  static const int _routeOverviewCameraDurationMs = 2200;
+  static const int _routeOverviewReturnCameraDurationMs = 1700;
+  static const int _recenterCameraDurationMs = 1500;
 
   static const Color _accentBlue = Color(0xFF2563EB);
   static const Color _successGreen = Color(0xFF16A34A);
@@ -62,6 +65,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   String _remainingDistanceText = '--';
   bool _ttsEnabled = true;
   bool _showingRouteOverview = false;
+  bool _carModelUsingOverviewScale = false;
   mapbox.PointAnnotationManager? _annotationManager;
   mapbox.PointAnnotation? _destinationMarker;
   static const double _routeStartSnapMeters = 5.0;
@@ -91,6 +95,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
   DateTime? _lastCarPosePaintAt;
   bool _carPosePaintInFlight = false;
+  bool _carModelRebuildInFlight = false;
   DateTime? _lastCameraFollowAt;
   bool _cameraFollowInFlight = false;
   DateTime? _lastRouteProgressPaintAt;
@@ -441,6 +446,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   void _handleNavigationMapGesture(mapbox.MapContentGestureContext context) {
     if (!_isNavigating) return;
     if (_showingRouteOverview) return;
+    unawaited(_restoreNavigationCarFlatScaleIfNeeded(force: true));
 
     _navService?.setFollowModeEnabled(false);
     _recenterTimer?.cancel();
@@ -462,24 +468,26 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _suppressFollowCamera = true; // ← add
     _navService?.setFollowModeEnabled(true);
     try {
-      await map.flyTo(
+      await map.easeTo(
         _navigationCamera(
           lat: current.lat.toDouble(),
           lng: current.lng.toDouble(),
           bearing: _mapBearing,
         ),
-        mapbox.MapAnimationOptions(duration: 550),
+        mapbox.MapAnimationOptions(duration: _recenterCameraDurationMs),
       );
-      await _setCarModelFlatScale(_carModelScale);
+      await _rebuildNavigationCarModelFlatScaleIfNeeded();
+
+      if (mounted) {
+        setState(() {
+          _isFollowingCamera = true;
+          _showingRouteOverview = false;
+        });
+      }
+      await Future.delayed(const Duration(milliseconds: 300));
     } finally {
       _suppressFollowCamera = false; // ← add
-    }
-
-    if (mounted) {
-      setState(() {
-        _isFollowingCamera = true;
-        _showingRouteOverview = false;
-      });
+      _lastCameraFollowAt = null;
     }
   }
 
@@ -507,11 +515,14 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         );
         final overviewZoom = overviewCamera.zoom ?? 14.0;
 
-        await map.flyTo(
-          overviewCamera,
-          mapbox.MapAnimationOptions(duration: 1500),
+        await _applyCarModelOverviewScaleExpression(
+          overviewZoom,
+          route.distanceMeters,
         );
-        await _applyCarModelOverviewScaleExpression(overviewZoom);
+        await map.easeTo(
+          overviewCamera,
+          mapbox.MapAnimationOptions(duration: _routeOverviewCameraDurationMs),
+        );
         if (!mounted) return;
         setState(() {
           _showingRouteOverview = true;
@@ -519,15 +530,17 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         });
       } else {
         _navService?.setFollowModeEnabled(true);
-        await map.flyTo(
+        await map.easeTo(
           _navigationCamera(
             lat: current.lat.toDouble(),
             lng: current.lng.toDouble(),
             bearing: _mapBearing,
           ),
-          mapbox.MapAnimationOptions(duration: 800),
+          mapbox.MapAnimationOptions(
+            duration: _routeOverviewReturnCameraDurationMs,
+          ),
         );
-        await _setCarModelFlatScale(_carModelScale);
+        await _rebuildNavigationCarModelFlatScaleIfNeeded();
 
         if (!mounted) return;
         setState(() {
@@ -766,11 +779,15 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         setState(() => _currentInstruction = msg);
         _safeSpeak('Rerouting, please wait');
       },
-      onRouteChanged: (newRoute) async {
+      onRouteChanged: (newRoute, rerouteOrigin) async {
         final drawing = MapboxDrawingService(mapboxMap: map);
         await drawing.drawRoute(newRoute);
         await _keepCarLayerAboveRoute();
         _buildDisplayRouteMetrics(newRoute);
+        final reseedPosition = mapbox.Position(
+          rerouteOrigin.longitude,
+          rerouteOrigin.latitude,
+        );
         if (!mounted) return;
         setState(() {
           _activeRoute = newRoute;
@@ -779,7 +796,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
             Duration(seconds: newRoute.durationSeconds.toInt()),
           );
         });
-        _reseedDisplayedCarForRoute(newRoute);
+        _reseedDisplayedCarForRoute(newRoute, fromPosition: reseedPosition);
       },
       onRouteProgress: (
         progressRoute,
@@ -937,6 +954,20 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     );
 
     await _removeCarModelLayer();
+    try {
+      final existingSource = await map.style.getSource(_carModelSourceId);
+      if (existingSource != null) {
+        // Source still there despite remove — try once more
+        try {
+          await map.style.removeStyleLayer(_carModelLayerId);
+        } catch (_) {}
+        try {
+          await map.style.removeStyleSource(_carModelSourceId);
+        } catch (_) {}
+      }
+    } catch (_) {
+      // getSource throws if not found — that's the happy path, continue
+    }
 
     await map.style.addSource(
       mapbox.GeoJsonSource(
@@ -964,6 +995,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       0.0,
       _carModelRotation(bearing),
     ]);
+    _carModelUsingOverviewScale = false;
     await _keepCarLayerAboveRoute();
     _displayCarPosition = position;
     _displayCarBearing = bearing;
@@ -989,8 +1021,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
   Future<void> _applyCarModelOverviewScaleExpression(
     double overviewZoom,
+    double routeDistanceMeters,
   ) async {
-    await Future.delayed(Duration(milliseconds: 500));
     final map = _mapboxMap;
     if (map == null) return;
     if (overviewZoom >= _navigationZoomLevel) {
@@ -998,11 +1030,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
       return;
     }
 
-    final compensation = pow(2, _navigationZoomLevel - overviewZoom).toDouble();
-    final overviewScale =
-        (_carModelScale * compensation)
-            .clamp(_carModelScale, _carModelScale * 50.0)
-            .toDouble();
+    final overviewScale = _overviewCarScaleForDistance(routeDistanceMeters);
 
     try {
       await map.style.setStyleLayerProperty(_carModelLayerId, 'model-scale', [
@@ -1020,7 +1048,35 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           [_carModelScale, _carModelScale, _carModelScale],
         ],
       ]);
+      _carModelUsingOverviewScale = true;
     } catch (_) {}
+  }
+
+  double _overviewCarScaleForDistance(double distanceMeters) {
+    final distanceKm = max(0.0, distanceMeters) / 1000;
+
+    final increment =
+        distanceMeters < 2904
+            ? 10
+            : distanceMeters < 5000
+            ? 15
+            : 20;
+
+    final multiplier = 1.0 + (distanceKm * increment);
+
+    final scale =
+        (_carModelScale * multiplier)
+            .clamp(_carModelScale, _carModelScale * 400)
+            .toDouble();
+
+    debugPrint(
+      "distance=$distanceMeters "
+      "km=$distanceKm "
+      "increment=$increment "
+      "scale=$scale",
+    );
+
+    return scale;
   }
 
   Future<void> _setCarModelFlatScale(double scale) async {
@@ -1032,7 +1088,73 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         scale,
         scale,
       ]);
+      if (scale == _carModelScale) {
+        _carModelUsingOverviewScale = false;
+      }
     } catch (_) {}
+  }
+
+  Future<void> _restoreNavigationCarFlatScaleIfNeeded({
+    bool force = false,
+  }) async {
+    if (!_isNavigating) return;
+    if (!force && !_carModelUsingOverviewScale) return;
+    await _setCarModelFlatScale(_carModelScale);
+  }
+
+  Future<void> _rebuildNavigationCarModelFlatScaleIfNeeded() async {
+    final map = _mapboxMap;
+    final position =
+        _displayCarPosition ?? _carTargetPosition ?? _currentPosition;
+    final bearing = _displayCarBearing ?? _carTargetBearing;
+    if (map == null ||
+        !_isNavigating ||
+        !_carModelUsingOverviewScale ||
+        _carModelRebuildInFlight ||
+        position == null) {
+      return;
+    }
+
+    _carModelRebuildInFlight = true;
+    try {
+      for (var i = 0; i < 6 && _carPosePaintInFlight; i++) {
+        await Future.delayed(const Duration(milliseconds: 16));
+      }
+      if (_carPosePaintInFlight) return;
+
+      await _removeCarModelLayer();
+      await map.style.addSource(
+        mapbox.GeoJsonSource(
+          id: _carModelSourceId,
+          data: _carPointGeoJson(position, bearing),
+        ),
+      );
+      final layer = mapbox.ModelLayer(
+        id: _carModelLayerId,
+        sourceId: _carModelSourceId,
+        slot: 'top',
+        modelId: _carModelUri,
+        modelScale: const [_carModelScale, _carModelScale, _carModelScale],
+        modelRotation: [0.0, 0.0, 0.0],
+        modelType: mapbox.ModelType.COMMON_3D,
+        modelCastShadows: false,
+        modelReceiveShadows: false,
+        modelEmissiveStrength: 0.7,
+        modelOpacity: 1.0,
+      );
+      await map.style.addLayer(layer);
+      await map.style.setStyleLayerProperty(
+        _carModelLayerId,
+        'model-rotation',
+        [0.0, 0.0, _carModelRotation(bearing)],
+      );
+      _carModelUsingOverviewScale = false;
+      await _keepCarLayerAboveRoute();
+    } catch (e) {
+      debugPrint('Car model flat rebuild skipped: $e');
+    } finally {
+      _carModelRebuildInFlight = false;
+    }
   }
 
   Future<void> _animateNavigationCarModel({
@@ -1222,6 +1344,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _lastCarAnimationTickAt = null;
     _lastCarPosePaintAt = null;
     _carPosePaintInFlight = false;
+    _carModelRebuildInFlight = false;
     _lastCameraFollowAt = null;
     _cameraFollowInFlight = false;
     _lastRouteProgressPaintAt = null;
@@ -1234,6 +1357,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     double bearing,
   ) async {
     // ── DEBUG LOG 2: paint skip tracking ─────────────────────────────
+    if (_carModelRebuildInFlight) return;
     if (_carPosePaintInFlight) {
       _dbgPaintSkipCount = (_dbgPaintSkipCount ?? 0) + 1;
       if (_dbgPaintSkipCount! % 10 == 0) {
@@ -1262,6 +1386,9 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     try {
       await _setNavigationCarModelPose(position: position, bearing: bearing);
+      if (!_showingRouteOverview) {
+        unawaited(_restoreNavigationCarFlatScaleIfNeeded());
+      }
 
       // ── DEBUG LOG 3 cont: how long did Mapbox take? ───────────────
       final paintDuration = DateTime.now().millisecondsSinceEpoch - paintStart;
@@ -1325,7 +1452,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     required double bearing,
   }) async {
     final map = _mapboxMap;
-    if (map == null || !_isNavigating) return;
+    if (map == null || !_isNavigating || _carModelRebuildInFlight) return;
 
     try {
       final source =
@@ -1366,6 +1493,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         'model-rotation',
         [0.0, 0.0, _carModelRotation(bearing)],
       );
+      _carModelUsingOverviewScale = false;
       await _keepCarLayerAboveRoute();
     }
   }
@@ -1415,16 +1543,21 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     }
   }
 
-  void _reseedDisplayedCarForRoute(MapboxRouteResult route) {
-    final position = _displayCarPosition;
+  void _reseedDisplayedCarForRoute(
+    MapboxRouteResult route, {
+    mapbox.Position? fromPosition,
+  }) {
+    final position = fromPosition ?? _displayCarPosition;
     if (position == null || route.coordinates.length < 2) return;
 
     final routeDistance = _nearestDisplayRouteDistance(route, position);
     if (routeDistance == null) return;
+    final routePosition = _positionAtRouteDistance(routeDistance) ?? position;
 
     _displayCarRouteDistance = routeDistance;
     _carTargetRouteDistance = routeDistance;
-    _carTargetPosition = position;
+    _displayCarPosition = routePosition;
+    _carTargetPosition = routePosition;
     _lastCarAnimationTickAt = DateTime.now();
     _ensureCarAnimationLoop();
   }
@@ -1702,6 +1835,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     try {
       await map.style.removeStyleSource(_carModelSourceId);
     } catch (_) {}
+    _carModelUsingOverviewScale = false;
   }
 
   Future<Uint8List> _createMarkerImage() async {

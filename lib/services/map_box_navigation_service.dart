@@ -47,7 +47,11 @@ class MapboxNavigationService {
   final void Function(int stepIndex, MapboxStep step)? onStepChanged;
   final void Function(int stepIndex, MapboxStep step)? onUpcomingInstruction;
   final void Function(String message)? onReroute;
-  final Future<void> Function(MapboxRouteResult route)? onRouteChanged;
+  final Future<void> Function(
+    MapboxRouteResult route,
+    geolocator.Position currentPosition,
+  )?
+  onRouteChanged;
   final Future<void> Function(
     MapboxRouteResult route,
     int closestRouteIndex,
@@ -114,6 +118,7 @@ class MapboxNavigationService {
     _offRouteCount = 0;
     _lastRouteDistanceMeters = 0;
     _lastAnnouncedStepIndex = -1;
+    _startTime = DateTime.now();
     _buildRouteMetrics(route);
   }
 
@@ -151,10 +156,13 @@ class MapboxNavigationService {
     final rawSnap =
         route == null ? null : _findNearestRoutePoint(position, route);
 
-    // Pehle forward-correction apply karo, PHIR bearing nikalo
+    // Pehle forward-correction apply karo, PHIR sirf accepted on-route snap
+    // visual layer ko do. Off-route snap distance car ko route start ki taraf
+    // kheench deta hai.
     final snap = rawSnap == null ? null : _keepProgressForward(rawSnap);
-    final bearing = _resolveBearing(position, snap);
-    final visualPosition = _resolveVisualPosition(position, snap);
+    final acceptedSnap = _isSnapOnRoute(position, snap) ? snap : null;
+    final bearing = _resolveBearing(position, acceptedSnap);
+    final visualPosition = _resolveVisualPosition(position, acceptedSnap);
 
     final speedKmh = (position.speed * 3.6).clamp(0.0, 300.0);
 
@@ -163,7 +171,7 @@ class MapboxNavigationService {
       speedKmh,
       bearing,
       visualPosition,
-      snap?.distanceAlongRouteMeters,
+      acceptedSnap?.distanceAlongRouteMeters,
     );
     if (route != null && snap != null) {
       _checkProgress(
@@ -219,6 +227,12 @@ class MapboxNavigationService {
     _checkDestination(position);
   }
 
+  bool _isSnapOnRoute(geolocator.Position position, _RouteSnap? snap) {
+    if (snap == null) return false;
+    final allowedDistance = max(_offRouteMeters, position.accuracy * 2.5);
+    return snap.distanceMeters <= allowedDistance;
+  }
+
   _RouteSnap _keepProgressForward(_RouteSnap snap) {
     if (snap.distanceAlongRouteMeters + 25 < _lastRouteDistanceMeters) {
       final lastAcceptedCoord = _coordinateAtRouteDistance(
@@ -259,7 +273,7 @@ class MapboxNavigationService {
       );
       if (newRoute != null && newRoute.coordinates.length >= 2) {
         _setRoute(newRoute);
-        await onRouteChanged?.call(newRoute);
+        await onRouteChanged?.call(newRoute, position);
         if (newRoute.steps.isNotEmpty) {
           onStepChanged?.call(0, newRoute.steps.first);
         }
