@@ -1,1258 +1,1106 @@
-// import 'dart:async';
-// import 'dart:math';
-// import 'dart:typed_data';
-// import 'dart:ui' as ui;
-
-// import 'package:flutter/material.dart';
-// import 'package:flutter/services.dart';
-// import 'package:flutter_compass/flutter_compass.dart';
-// import 'package:geolocator/geolocator.dart' as geolocator;
-// import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
-// import 'package:ors_map_test/services/ors_service.dart';
-// import 'package:ors_map_test/services/tts_service.dart';
-// import 'package:ors_map_test/widgets/places_search.dart';
-
-// // NOTE: google_maps_flutter import NAHI karo — conflict hoga
-
-// class MapboxScreen extends StatefulWidget {
-//   const MapboxScreen({super.key});
-
-//   @override
-//   State<MapboxScreen> createState() => _MapboxScreenState();
-// }
-
-// class _MapboxScreenState extends State<MapboxScreen> {
-//   // ── Map ───────────────────────────────────────
-//   mapbox.MapboxMap? _mapboxMap;
-
-//   // Annotation managers
-//   mapbox.PolylineAnnotationManager? _polylineManager;
-//   mapbox.PointAnnotationManager? _pointManager;
-
-//   // Annotations
-//   mapbox.PointAnnotation? _carAnnotation;
-//   mapbox.PointAnnotation? _destAnnotation;
-//   mapbox.PolylineAnnotation? _routeAnnotation;
-//   mapbox.PolylineAnnotation? _traveledAnnotation;
-
-//   // ── Location ──────────────────────────────────
-//   mapbox.Position? _currentPos;
-//   double _heading = 0;
-
-//   // ── Route ─────────────────────────────────────
-//   List<mapbox.Position> _fullRoute = [];
-//   RouteResult? _routeResult;
-//   mapbox.Position? _destinationPos;
-
-//   // ── Navigation State ──────────────────────────
-//   bool _isNavigating = false;
-//   bool _startNavigation = false;
-//   bool _isLoading = false;
-//   int _currentStepIndex = 0;
-//   int _offRouteCount = 0;
-//   bool _isRerouting = false;
-//   DateTime? _navigationStartTime;
-
-//   // ── Live Stats ────────────────────────────────
-//   double _currentSpeedKmh = 0;
-//   double _remainingDistanceM = 0;
-//   String _arrivalTime = '';
-
-//   // ── UI ────────────────────────────────────────
-//   bool _isNightMode = false;
-
-//   // ── Streams ───────────────────────────────────
-//   StreamSubscription<geolocator.Position>? _gpsSub;
-//   StreamSubscription<CompassEvent>? _compassSub;
-
-//   // ── Services ──────────────────────────────────
-//   final TtsService _tts = TtsService();
-
-//   // ── Defaults ──────────────────────────────────
-//   // Islamabad — lon, lat order (Mapbox convention)
-//   static final _defaultPos = mapbox.Position(73.0479, 33.6844);
-
-//   mapbox.PointAnnotation? _locationAnnotation; // add this field
-
-//   // ─────────────────────────────────────────────
-//   @override
-//   void initState() {
-//     super.initState();
-//     _initLocation();
-//     _startCompass();
-//   }
-
-//   @override
-//   void dispose() {
-//     _gpsSub?.cancel();
-//     _compassSub?.cancel();
-//     _tts.stop();
-//     super.dispose();
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // COMPASS
-//   // ══════════════════════════════════════════════
-
-//   void _startCompass() {
-//     _compassSub = FlutterCompass.events?.listen((CompassEvent event) {
-//       if (event.heading == null) return;
-//       // Sirf tab compass use karo jab GPS heading nahi aa rahi
-//       // (gaadi ruki ho ya GPS stream band ho)
-//       if (_gpsSub == null && mounted) {
-//         setState(() => _heading = event.heading!);
-//       }
-//     });
-//   }
-
-//   Future<void> _updateLocationMarker(mapbox.Position pos) async {
-//     if (_pointManager == null) return;
-//     if (_locationAnnotation == null) {
-//       _locationAnnotation = await _pointManager!.create(
-//         mapbox.PointAnnotationOptions(
-//           geometry: mapbox.Point(coordinates: pos),
-//           iconImage: 'location_puck', // register this icon below
-//           iconSize: 1.5,
-//         ),
-//       );
-//     } else {
-//       _locationAnnotation!.geometry = mapbox.Point(coordinates: pos);
-//       await _pointManager!.update(_locationAnnotation!);
-//     }
-//   }
-//   // ══════════════════════════════════════════════
-//   // LOCATION PERMISSION + INIT
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _initLocation() async {
-//     geolocator.LocationPermission permission =
-//         await geolocator.Geolocator.checkPermission();
-
-//     if (permission == geolocator.LocationPermission.denied) {
-//       permission = await geolocator.Geolocator.requestPermission();
-//       if (permission == geolocator.LocationPermission.denied) {
-//         if (mounted) setState(() => _currentPos = _defaultPos);
-//         return;
-//       }
-//     }
-
-//     if (permission == geolocator.LocationPermission.deniedForever) {
-//       if (mounted) setState(() => _currentPos = _defaultPos);
-//       return;
-//     }
-
-//     try {
-//       final position = await geolocator.Geolocator.getCurrentPosition(
-//         locationSettings: const geolocator.LocationSettings(
-//           accuracy: geolocator.LocationAccuracy.high,
-//         ),
-//       );
-
-//       if (!mounted) return;
-//       setState(() {
-//         _currentPos = mapbox.Position(position.longitude, position.latitude);
-//         _updateLocationMarker(_currentPos!);
-//       });
-
-//       _mapboxMap?.setCamera(
-//         mapbox.CameraOptions(
-//           center: mapbox.Point(coordinates: _currentPos!),
-//           zoom: 15,
-//         ),
-//       );
-//     } catch (e) {
-//       if (mounted) setState(() => _currentPos = _defaultPos);
-//     }
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // GPS LIVE TRACKING
-//   // ══════════════════════════════════════════════
-
-//   void _startLiveTracking() {
-//     _gpsSub?.cancel();
-
-//     _gpsSub = geolocator.Geolocator.getPositionStream(
-//       locationSettings: const geolocator.LocationSettings(
-//         accuracy: geolocator.LocationAccuracy.high,
-//         distanceFilter: 10, // har 10 meter par update
-//       ),
-//     ).listen((position) {
-//       final newPos = mapbox.Position(position.longitude, position.latitude);
-//       final speedKmh = (position.speed * 3.6).clamp(0.0, 300.0);
-
-//       if (!mounted) return;
-//       setState(() {
-//         _currentPos = newPos;
-//         _currentSpeedKmh = speedKmh;
-//         // GPS heading sirf tab use karo jab gaadi chal rahi ho
-//         if (position.speed > 0.5 && !position.heading.isNaN) {
-//           _heading = position.heading;
-//         }
-//       });
-
-//       // Car marker — sirf navigation mein update karo
-//       if (_isNavigating) {
-//         _updateCarMarker(newPos);
-//       }
-
-//       // Route progress update
-//       if (_fullRoute.isNotEmpty) {
-//         _updateProgress(newPos);
-//       }
-
-//       // Navigation camera — car ke saath move kare
-//       if (_isNavigating && _fullRoute.isNotEmpty) {
-//         _mapboxMap?.setCamera(
-//           mapbox.CameraOptions(
-//             center: mapbox.Point(coordinates: newPos),
-//             zoom: 19,
-//             pitch: 60,
-//             bearing: _heading,
-//           ),
-//         );
-//       }
-//     });
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // CAR MARKER — sirf navigation mein dikhao
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _updateCarMarker(mapbox.Position pos) async {
-//     if (_pointManager == null) return;
-
-//     // Sirf _isNavigating mein hi car dikhao
-//     if (!_isNavigating) {
-//       // Navigation band ho gayi — car hata do
-//       if (_carAnnotation != null) {
-//         await _pointManager!.delete(_carAnnotation!);
-//         _carAnnotation = null;
-//       }
-//       return;
-//     }
-
-//     if (_carAnnotation == null) {
-//       // Pehli baar banao
-//       _carAnnotation = await _pointManager!.create(
-//         mapbox.PointAnnotationOptions(
-//           geometry: mapbox.Point(coordinates: pos),
-//           iconImage: 'car_icon', // style mein register hona chahiye
-//           iconSize: 0.5,
-//           iconRotate: _heading,
-//         ),
-//       );
-//     } else {
-//       // Update karo position + rotation
-//       _carAnnotation!.geometry = mapbox.Point(coordinates: pos);
-//       _carAnnotation!.iconRotate = _heading;
-//       await _pointManager!.update(_carAnnotation!);
-//     }
-//   }
-
-//   // Car icon ko Mapbox style mein register karo (PNG asset se)
-//   Future<void> _registerCarIcon(mapbox.MapboxMap map) async {
-//     try {
-//       // Asset se bytes load karo
-//       final ByteData data = await rootBundle.load('assets/car_icon.png');
-//       final Uint8List bytes = data.buffer.asUint8List();
-
-//       // Image decode karo dimensions ke liye
-//       final ui.Codec codec = await ui.instantiateImageCodec(bytes);
-//       final ui.FrameInfo fi = await codec.getNextFrame();
-//       final int w = fi.image.width;
-//       final int h = fi.image.height;
-
-//       // Mapbox style mein register karo
-//       await map.style.addStyleImage(
-//         'car_icon',
-//         1.0, // scale
-//         mapbox.MbxImage(width: w, height: h, data: bytes),
-//         false, // sdf
-//         [], // stretchX
-//         [], // stretchY
-//         null, // content
-//       );
-//     } catch (e) {
-//       debugPrint('Car icon register error: $e');
-//     }
-//   }
-
-//   // Destination icon bhi register karo
-//   Future<void> _registerDestinationIcon(mapbox.MapboxMap map) async {
-//     try {
-//       final ByteData data = await rootBundle.load(
-//         'assets/destination_icon.png',
-//       );
-//       final Uint8List bytes = data.buffer.asUint8List();
-
-//       final ui.Codec codec = await ui.instantiateImageCodec(bytes);
-//       final ui.FrameInfo fi = await codec.getNextFrame();
-
-//       await map.style.addStyleImage(
-//         'destination_icon',
-//         1.0,
-//         mapbox.MbxImage(
-//           width: fi.image.width,
-//           height: fi.image.height,
-//           data: bytes,
-//         ),
-//         false,
-//         [],
-//         [],
-//         null,
-//       );
-//     } catch (e) {
-//       debugPrint('Destination icon register error: $e');
-//     }
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // ROUTE PROGRESS
-//   // ══════════════════════════════════════════════
-
-//   void _updateProgress(mapbox.Position carPos) {
-//     if (_fullRoute.isEmpty) return;
-
-//     // Sabse nazdik route point dhundo
-//     int closestIndex = 0;
-//     double minDist = double.infinity;
-
-//     for (int i = 0; i < _fullRoute.length; i++) {
-//       final d = _haversineMeters(carPos, _fullRoute[i]);
-//       if (d < minDist) {
-//         minDist = d;
-//         closestIndex = i;
-//       }
-//     }
-
-//     // ── Off route check ──────────────────────────
-//     if (minDist > 50 && _destinationPos != null) {
-//       if (_isRerouting) return;
-
-//       // Navigation abhi shuru hua — 8 seconds wait karo GPS settle hone do
-//       if (_navigationStartTime != null) {
-//         final elapsed = DateTime.now().difference(_navigationStartTime!);
-//         if (elapsed.inSeconds < 8) return;
-//       }
-
-//       _offRouteCount++;
-//       if (_offRouteCount < 3) return; // 3 consecutive off-route = reroute
-
-//       _offRouteCount = 0;
-//       _isRerouting = true;
-//       _getRoute(carPos, _destinationPos!).then((_) => _isRerouting = false);
-//       return;
-//     }
-
-//     _offRouteCount = 0;
-
-//     // ── Remaining distance ───────────────────────
-//     double remaining = 0;
-//     for (int i = closestIndex; i < _fullRoute.length - 1; i++) {
-//       remaining += _haversineMeters(_fullRoute[i], _fullRoute[i + 1]);
-//     }
-
-//     // ── Arrival time ─────────────────────────────
-//     String arrival = '';
-//     if (_currentSpeedKmh > 5) {
-//       // Gaadi chal rahi hai — actual speed se calculate karo
-//       final speedMs = _currentSpeedKmh / 3.6;
-//       final secondsLeft = remaining / speedMs;
-//       final arrivalDateTime = DateTime.now().add(
-//         Duration(seconds: secondsLeft.toInt()),
-//       );
-//       final h = arrivalDateTime.hour;
-//       final m = arrivalDateTime.minute.toString().padLeft(2, '0');
-//       final period = h >= 12 ? 'PM' : 'AM';
-//       final displayH = h % 12 == 0 ? 12 : h % 12;
-//       arrival = '$displayH:$m $period';
-//     } else {
-//       // Gaadi ruki hai — ORS duration se estimate karo
-//       if (_routeResult != null && _routeResult!.distanceMeters > 0) {
-//         final secondsLeft =
-//             (_routeResult!.durationSeconds *
-//                     (remaining / _routeResult!.distanceMeters))
-//                 .toInt();
-//         final arrivalDateTime = DateTime.now().add(
-//           Duration(seconds: secondsLeft),
-//         );
-//         final h = arrivalDateTime.hour;
-//         final m = arrivalDateTime.minute.toString().padLeft(2, '0');
-//         final period = h >= 12 ? 'PM' : 'AM';
-//         final displayH = h % 12 == 0 ? 12 : h % 12;
-//         arrival = '$displayH:$m $period';
-//       }
-//     }
-
-//     if (mounted) {
-//       setState(() {
-//         _remainingDistanceM = remaining;
-//         _arrivalTime = arrival;
-//       });
-//     }
-
-//     // Step advance check — sirf navigation mein
-//     if (_isNavigating) _checkStepAdvance(carPos);
-
-//     // Polyline update — gray + yellow
-//     _updateRoutePolyline(closestIndex);
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // POLYLINE UPDATE
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _updateRoutePolyline(int closestIndex) async {
-//     if (_polylineManager == null || _fullRoute.isEmpty) return;
-
-//     // Traveled portion — gray
-//     if (_traveledAnnotation != null) {
-//       _traveledAnnotation!.geometry = mapbox.LineString(
-//         coordinates: _fullRoute.sublist(0, closestIndex + 1),
-//       );
-//       await _polylineManager!.update(_traveledAnnotation!);
-//     }
-
-//     // Remaining portion — yellow
-//     if (_routeAnnotation != null) {
-//       _routeAnnotation!.geometry = mapbox.LineString(
-//         coordinates: _fullRoute.sublist(closestIndex),
-//       );
-//       await _polylineManager!.update(_routeAnnotation!);
-//     }
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // GET ROUTE
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _getRoute(mapbox.Position from, mapbox.Position to) async {
-//     if (mounted) setState(() => _isLoading = true);
-
-//     // OrsService ab sirf doubles leta hai — koi LatLng wrapper nahi chahiye
-//     final result = await OrsService.getRoute(
-//       fromLat: from.lat as double,
-//       fromLng: from.lng as double,
-//       toLat: to.lat as double,
-//       toLng: to.lng as double,
-//     );
-
-//     if (result == null) {
-//       if (mounted) {
-//         setState(() => _isLoading = false);
-//         ScaffoldMessenger.of(context).showSnackBar(
-//           const SnackBar(
-//             content: Text('Route nahi mila — internet check karo'),
-//             backgroundColor: Colors.red,
-//           ),
-//         );
-//       }
-//       return;
-//     }
-
-//     // ORS LatLng → Mapbox Position
-//     final routePositions =
-//         result.points
-//             .map((p) => mapbox.Position(p.longitude, p.latitude))
-//             .toList();
-
-//     if (mounted) {
-//       setState(() {
-//         _isLoading = false;
-//         _routeResult = result;
-//         _fullRoute = routePositions;
-//       });
-//     }
-
-//     // Purani polylines hatao
-//     await _polylineManager?.deleteAll();
-//     _routeAnnotation = null;
-//     _traveledAnnotation = null;
-
-//     // Traveled (gray) — initially sirf ek point
-//     _traveledAnnotation = await _polylineManager?.create(
-//       mapbox.PolylineAnnotationOptions(
-//         geometry: mapbox.LineString(coordinates: routePositions.sublist(0, 1)),
-//         lineColor: Colors.grey.shade400.value,
-//         lineWidth: 5,
-//       ),
-//     );
-
-//     // Remaining (yellow) — poori route
-//     _routeAnnotation = await _polylineManager?.create(
-//       mapbox.PolylineAnnotationOptions(
-//         geometry: mapbox.LineString(coordinates: routePositions),
-//         lineColor: Colors.yellow.value,
-//         lineWidth: 6,
-//       ),
-//     );
-
-//     _fitBounds(from, to);
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // FIT BOUNDS
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _fitBounds(mapbox.Position a, mapbox.Position b) async {
-//     final minLng = min(a.lng as double, b.lng as double);
-//     final maxLng = max(a.lng as double, b.lng as double);
-//     final minLat = min(a.lat as double, b.lat as double);
-//     final maxLat = max(a.lat as double, b.lat as double);
-
-//     await _mapboxMap
-//         ?.cameraForCoordinateBounds(
-//           mapbox.CoordinateBounds(
-//             southwest: mapbox.Point(
-//               coordinates: mapbox.Position(minLng, minLat),
-//             ),
-//             northeast: mapbox.Point(
-//               coordinates: mapbox.Position(maxLng, maxLat),
-//             ),
-//             infiniteBounds: false,
-//           ),
-//           mapbox.MbxEdgeInsets(top: 80, left: 80, bottom: 200, right: 80),
-//           null,
-//           null,
-//           null,
-//           null,
-//         )
-//         .then((camera) => _mapboxMap?.setCamera(camera));
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // MAP TAP — destination set
-//   // ══════════════════════════════════════════════
-
-//   void _onMapTapped(mapbox.Position tappedPos) async {
-//     if (_currentPos == null) return;
-//     if (_pointManager == null) return;
-//     _destinationPos = tappedPos;
-
-//     // Destination marker lagao
-//     if (_pointManager != null) {
-//       if (_destAnnotation != null) {
-//         await _pointManager!.delete(_destAnnotation!);
-//         _destAnnotation = null;
-//       }
-//       _destAnnotation = await _pointManager!.create(
-//         mapbox.PointAnnotationOptions(
-//           geometry: mapbox.Point(coordinates: tappedPos),
-//           iconImage: 'marker',
-//           iconSize: 0.5,
-//         ),
-//       );
-//     }
-
-//     if (mounted) {
-//       setState(() {
-//         _fullRoute = [];
-//         _routeResult = null;
-//       });
-//     }
-
-//     await _getRoute(_currentPos!, tappedPos);
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // STEP ADVANCE — navigation turn-by-turn
-//   // ══════════════════════════════════════════════
-
-//   void _checkStepAdvance(mapbox.Position carPos) {
-//     if (!_isNavigating) return;
-//     if (_routeResult == null || _routeResult!.steps.isEmpty) return;
-
-//     // Last step — destination check karo
-//     if (_currentStepIndex >= _routeResult!.steps.length - 1) {
-//       if (_destinationPos != null) {
-//         final dist = _haversineMeters(carPos, _destinationPos!);
-//         if (dist < 30) _onDestinationReached(); // 30m ke andar = pahunch gaye
-//       }
-//       return;
-//     }
-
-//     final endPoint = _getStepEndPoint(_currentStepIndex);
-//     final distance = _haversineMeters(carPos, endPoint);
-
-//     // 25 meter se kam → next step
-//     if (distance < 25) {
-//       if (mounted) setState(() => _currentStepIndex++);
-//       _tts.speak(_routeResult!.steps[_currentStepIndex].instruction);
-//     }
-//   }
-
-//   mapbox.Position _getStepEndPoint(int stepIndex) {
-//     if (_fullRoute.isEmpty) return _currentPos ?? _defaultPos;
-
-//     double cumulative = 0;
-//     for (int i = 0; i <= stepIndex; i++) {
-//       cumulative += _routeResult!.steps[i].distance;
-//     }
-
-//     final ratio = (cumulative / _routeResult!.distanceMeters).clamp(0.0, 1.0);
-//     final index = (ratio * (_fullRoute.length - 1)).toInt();
-//     return _fullRoute[index];
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // DESTINATION REACHED
-//   // ══════════════════════════════════════════════
-
-//   void _onDestinationReached() {
-//     _tts.speak('You have reached your destination');
-//     _gpsSub?.cancel();
-//     _gpsSub = null;
-
-//     if (!mounted) return;
-//     setState(() {
-//       _isNavigating = false;
-//       _startNavigation = false;
-//       _currentStepIndex = 0;
-//     });
-
-//     // Car annotation hata do
-//     if (_carAnnotation != null) {
-//       _pointManager?.delete(_carAnnotation!);
-//       _carAnnotation = null;
-//     }
-
-//     showDialog(
-//       context: context,
-//       builder:
-//           (_) => AlertDialog(
-//             title: const Text('🎉 Pahunch Gaye!'),
-//             content: const Text('Aap apni destination par pahunch gaye.'),
-//             actions: [
-//               TextButton(
-//                 onPressed: () {
-//                   Navigator.pop(context);
-//                   if (!mounted) return;
-//                   setState(() {
-//                     _destinationPos = null;
-//                     _fullRoute = [];
-//                     _routeResult = null;
-//                   });
-//                   _polylineManager?.deleteAll();
-//                   _routeAnnotation = null;
-//                   _traveledAnnotation = null;
-//                   if (_destAnnotation != null) {
-//                     _pointManager?.delete(_destAnnotation!);
-//                     _destAnnotation = null;
-//                   }
-//                 },
-//                 child: const Text('Done'),
-//               ),
-//             ],
-//           ),
-//     );
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // NIGHT MODE
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _applyMapStyle() async {
-//     final uri =
-//         _isNightMode ? mapbox.MapboxStyles.DARK : mapbox.MapboxStyles.STANDARD;
-//     await _mapboxMap?.loadStyleURI(uri);
-//     // Style reload hone ke baad icons phir se register karne honge
-//     if (_mapboxMap != null) {
-//       await _registerCarIcon(_mapboxMap!);
-//       await _registerDestinationIcon(_mapboxMap!);
-
-//       _polylineManager =
-//           await _mapboxMap!.annotations.createPolylineAnnotationManager();
-//       _pointManager =
-//           await _mapboxMap!.annotations.createPointAnnotationManager();
-
-//       if (_fullRoute.isNotEmpty &&
-//           _currentPos != null &&
-//           _destinationPos != null) {
-//         await _getRoute(_currentPos!, _destinationPos!);
-//       }
-//     }
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // HELPERS
-//   // ══════════════════════════════════════════════
-
-//   double _haversineMeters(mapbox.Position a, mapbox.Position b) {
-//     const R = 6371000.0;
-//     final dLat = ((b.lat as double) - (a.lat as double)) * pi / 180;
-//     final dLng = ((b.lng as double) - (a.lng as double)) * pi / 180;
-//     final h =
-//         pow(sin(dLat / 2), 2) +
-//         cos((a.lat as double) * pi / 180) *
-//             cos((b.lat as double) * pi / 180) *
-//             pow(sin(dLng / 2), 2);
-//     return 2 * R * asin(sqrt(h.toDouble()));
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // MAP CREATED CALLBACK
-//   // ══════════════════════════════════════════════
-
-//   Future<void> _onMapCreated(mapbox.MapboxMap map) async {
-//     _mapboxMap = map;
-
-//     await map.location.updateSettings(
-//       mapbox.LocationComponentSettings(enabled: true, pulsingEnabled: true),
-//     );
-//     // 3D buildings on
-//     await map.style.setStyleImportConfigProperty(
-//       'basemap',
-//       'show3dObjects',
-//       true,
-//     );
-
-//     // Custom icons register karo
-//     await _registerCarIcon(map);
-//     await _registerDestinationIcon(map);
-
-//     // Annotation managers
-//     _polylineManager = await map.annotations.createPolylineAnnotationManager();
-//     _pointManager = await map.annotations.createPointAnnotationManager();
-
-//     // Agar location pehle se aa gayi thi — camera wahan le jao
-//     if (_currentPos != null) {
-//       map.setCamera(
-//         mapbox.CameraOptions(
-//           center: mapbox.Point(coordinates: _currentPos!),
-//           zoom: 15,
-//         ),
-//       );
-//     }
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // BUILD
-//   // ══════════════════════════════════════════════
-
-//   @override
-//   Widget build(BuildContext context) {
-//     return Scaffold(
-//       body: Stack(
-//         children: [
-//           // ── Mapbox Map ────────────────────────────
-//           mapbox.MapWidget(
-//             cameraOptions: mapbox.CameraOptions(
-//               center: mapbox.Point(coordinates: _currentPos ?? _defaultPos),
-//               zoom: 15,
-//               pitch: 0,
-//             ),
-//             styleUri: mapbox.MapboxStyles.STANDARD,
-//             onMapCreated: _onMapCreated,
-//             onTapListener: (context) {
-//               // Navigation chal rahi ho toh tap se destination change nahi hona chahiye
-//               if (_isNavigating) return;
-//               final pos = mapbox.Position(
-//                 context.point.coordinates.lng as double,
-//                 context.point.coordinates.lat as double,
-//               );
-//               _onMapTapped(pos);
-//             },
-//           ),
-
-//           // ── Search Bar (navigation mein nahi dikhega) ─
-//           if (!_isNavigating)
-//             Positioned(
-//               top: 0,
-//               left: 0,
-//               right: 0,
-//               child: SafeArea(
-//                 child: PlacesSearch(
-//                   onPlaceSelected: (latLng) {
-//                     _onMapTapped(
-//                       mapbox.Position(latLng.longitude, latLng.latitude),
-//                     );
-//                   },
-//                 ),
-//               ),
-//             ),
-
-//           // ── Navigation HUD ────────────────────────
-//           if (_isNavigating &&
-//               _routeResult != null &&
-//               _routeResult!.steps.isNotEmpty)
-//             Positioned(
-//               top: 0,
-//               left: 0,
-//               right: 0,
-//               child: SafeArea(child: _buildNavCard()),
-//             ),
-
-//           // ── Loading Overlay ───────────────────────
-//           if (_isLoading)
-//             Container(
-//               color: Colors.black.withOpacity(0.3),
-//               child: const Center(
-//                 child: Card(
-//                   child: Padding(
-//                     padding: EdgeInsets.all(20),
-//                     child: Column(
-//                       mainAxisSize: MainAxisSize.min,
-//                       children: [
-//                         CircularProgressIndicator(color: Colors.yellow),
-//                         SizedBox(height: 12),
-//                         Text('Route dhoondh raha hun...'),
-//                       ],
-//                     ),
-//                   ),
-//                 ),
-//               ),
-//             ),
-
-//           // ── Clear Destination Marker FAB ──────────
-//           // Google Maps jaise — destination marker hata do
-//           if (_destAnnotation != null && !_isNavigating)
-//             Positioned(
-//               bottom: _routeResult != null ? 250 : 230,
-//               left: 16,
-//               child: FloatingActionButton.small(
-//                 heroTag: 'clearMarker',
-//                 backgroundColor: Colors.red,
-//                 onPressed: () async {
-//                   if (_destAnnotation != null) {
-//                     await _pointManager?.delete(_destAnnotation!);
-//                     setState(() {
-//                       _destAnnotation = null;
-//                       _destinationPos = null;
-//                     });
-//                   }
-//                 },
-//                 child: const Icon(Icons.clear, color: Colors.white),
-//               ),
-//             ),
-
-//           // ── My Location FAB ───────────────────────
-//           Positioned(
-//             bottom: _routeResult != null ? 220 : 180,
-//             left: 16,
-//             child: FloatingActionButton.small(
-//               heroTag: 'myLocation',
-//               backgroundColor:
-//                   _isNightMode ? const Color(0xFF1A1A2E) : Colors.white,
-//               onPressed: () async {
-//                 try {
-//                   final pos = await geolocator.Geolocator.getCurrentPosition();
-//                   _mapboxMap?.setCamera(
-//                     mapbox.CameraOptions(
-//                       center: mapbox.Point(
-//                         coordinates: mapbox.Position(
-//                           pos.longitude,
-//                           pos.latitude,
-//                         ),
-//                       ),
-//                       zoom: 17,
-//                     ),
-//                   );
-//                 } catch (e) {
-//                   debugPrint('Location error: $e');
-//                 }
-//               },
-//               child: Icon(
-//                 Icons.my_location,
-//                 color: _isNightMode ? Colors.white : Colors.black87,
-//               ),
-//             ),
-//           ),
-
-//           // ── Night Mode FAB ────────────────────────
-//           Positioned(
-//             left: 16,
-//             bottom: _routeResult != null ? 170 : 130,
-//             child: FloatingActionButton.small(
-//               heroTag: 'nightMode',
-//               backgroundColor:
-//                   _isNightMode ? const Color(0xFF1A1A2E) : Colors.white,
-//               onPressed: () {
-//                 setState(() => _isNightMode = !_isNightMode);
-//                 _applyMapStyle();
-//               },
-//               child: Icon(
-//                 _isNightMode ? Icons.wb_sunny_rounded : Icons.nightlight_round,
-//                 color: _isNightMode ? Colors.yellow : Colors.indigo,
-//               ),
-//             ),
-//           ),
-
-//           // ── Bottom Card ───────────────────────────
-//           if (_routeResult != null)
-//             Positioned(bottom: 0, left: 0, right: 0, child: _buildBottomCard()),
-//         ],
-//       ),
-//     );
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // NAV CARD — turn-by-turn instruction
-//   // ══════════════════════════════════════════════
-
-//   Widget _buildNavCard() {
-//     final steps = _routeResult!.steps;
-//     final current = steps[_currentStepIndex];
-//     final hasNext = _currentStepIndex + 1 < steps.length;
-//     final next = hasNext ? steps[_currentStepIndex + 1] : null;
-
-//     return Container(
-//       margin: const EdgeInsets.all(12),
-//       decoration: BoxDecoration(
-//         color: const Color(0xFF1A1A2E),
-//         borderRadius: BorderRadius.circular(16),
-//         boxShadow: [BoxShadow(color: Colors.black38, blurRadius: 12)],
-//       ),
-//       child: Column(
-//         mainAxisSize: MainAxisSize.min,
-//         children: [
-//           // Current step
-//           Padding(
-//             padding: const EdgeInsets.all(16),
-//             child: Row(
-//               children: [
-//                 Container(
-//                   padding: const EdgeInsets.all(12),
-//                   decoration: BoxDecoration(
-//                     color: Colors.white12,
-//                     borderRadius: BorderRadius.circular(12),
-//                   ),
-//                   child: Icon(current.icon, color: Colors.white, size: 32),
-//                 ),
-//                 const SizedBox(width: 14),
-//                 Expanded(
-//                   child: Column(
-//                     crossAxisAlignment: CrossAxisAlignment.start,
-//                     children: [
-//                       Text(
-//                         current.distanceText,
-//                         style: const TextStyle(
-//                           color: Color(0xFF4FC3F7),
-//                           fontSize: 22,
-//                           fontWeight: FontWeight.bold,
-//                         ),
-//                       ),
-//                       const SizedBox(height: 4),
-//                       Text(
-//                         current.instruction,
-//                         style: const TextStyle(
-//                           color: Colors.white,
-//                           fontSize: 14,
-//                         ),
-//                         maxLines: 2,
-//                         overflow: TextOverflow.ellipsis,
-//                       ),
-//                     ],
-//                   ),
-//                 ),
-//               ],
-//             ),
-//           ),
-
-//           // Next step preview
-//           if (next != null)
-//             Container(
-//               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-//               decoration: const BoxDecoration(
-//                 color: Colors.white10,
-//                 borderRadius: BorderRadius.vertical(
-//                   bottom: Radius.circular(16),
-//                 ),
-//               ),
-//               child: Row(
-//                 children: [
-//                   Icon(next.icon, color: Colors.white60, size: 18),
-//                   const SizedBox(width: 8),
-//                   Expanded(
-//                     child: Text(
-//                       'Then: ${next.instruction}',
-//                       style: const TextStyle(
-//                         color: Colors.white60,
-//                         fontSize: 12,
-//                       ),
-//                       maxLines: 1,
-//                       overflow: TextOverflow.ellipsis,
-//                     ),
-//                   ),
-//                 ],
-//               ),
-//             ),
-//         ],
-//       ),
-//     );
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // BOTTOM CARD — route info + buttons
-//   // ══════════════════════════════════════════════
-
-//   Widget _buildBottomCard() {
-//     return Container(
-//       decoration: const BoxDecoration(
-//         color: Colors.white,
-//         borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
-//       ),
-//       padding: const EdgeInsets.fromLTRB(20, 16, 20, 32),
-//       child: Column(
-//         mainAxisSize: MainAxisSize.min,
-//         children: [
-//           // Handle bar
-//           Container(
-//             width: 40,
-//             height: 4,
-//             decoration: BoxDecoration(
-//               color: Colors.grey.shade300,
-//               borderRadius: BorderRadius.circular(2),
-//             ),
-//           ),
-//           const SizedBox(height: 16),
-
-//           // Distance + Duration cards
-//           Row(
-//             children: [
-//               Expanded(
-//                 child: _statCard(
-//                   icon: Icons.route_rounded,
-//                   value: _routeResult!.distanceText,
-//                   label: 'Distance',
-//                   color: const Color(0xFFEFF6FF),
-//                   valueColor: const Color(0xFF1E3A8A),
-//                   iconColor: const Color(0xFF4285F4),
-//                 ),
-//               ),
-//               const SizedBox(width: 12),
-//               Expanded(
-//                 child: _statCard(
-//                   icon: Icons.timer_rounded,
-//                   value: _routeResult!.durationText,
-//                   label: 'Duration',
-//                   color: const Color(0xFFF0FDF4),
-//                   valueColor: const Color(0xFF14532D),
-//                   iconColor: const Color(0xFF16A34A),
-//                 ),
-//               ),
-//             ],
-//           ),
-//           const SizedBox(height: 12),
-
-//           // Live stats — sirf navigation mein
-//           if (_isNavigating)
-//             Container(
-//               margin: const EdgeInsets.only(bottom: 12),
-//               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-//               decoration: BoxDecoration(
-//                 color: const Color(0xFF1A1A2E),
-//                 borderRadius: BorderRadius.circular(14),
-//               ),
-//               child: Row(
-//                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
-//                 children: [
-//                   _navStat(_currentSpeedKmh.toStringAsFixed(0), 'km/h'),
-//                   Container(width: 1, height: 36, color: Colors.white24),
-//                   _navStat(
-//                     _remainingDistanceM >= 1000
-//                         ? (_remainingDistanceM / 1000).toStringAsFixed(1)
-//                         : '${_remainingDistanceM.toInt()}',
-//                     _remainingDistanceM >= 1000 ? 'km left' : 'm left',
-//                   ),
-//                   Container(width: 1, height: 36, color: Colors.white24),
-//                   _navStat(
-//                     _arrivalTime.isEmpty ? '--:--' : _arrivalTime,
-//                     'arrival',
-//                     color: const Color(0xFF4FC3F7),
-//                   ),
-//                 ],
-//               ),
-//             ),
-
-//           // Start / Stop Navigation button
-//           SizedBox(
-//             width: double.infinity,
-//             child: ElevatedButton.icon(
-//               onPressed: () {
-//                 setState(() {
-//                   _startNavigation = !_startNavigation;
-//                   _isNavigating = _startNavigation;
-//                   _currentStepIndex = 0;
-//                   _offRouteCount = 0;
-//                   _isRerouting = false;
-//                 });
-
-//                 if (_startNavigation) {
-//                   // Navigation shuru
-//                   _navigationStartTime = DateTime.now();
-//                   _startLiveTracking();
-//                   if (_routeResult!.steps.isNotEmpty) {
-//                     _tts.speak(_routeResult!.steps[0].instruction);
-//                   }
-//                   ScaffoldMessenger.of(context).showSnackBar(
-//                     const SnackBar(
-//                       content: Text('Navigation shuru ho gaya!'),
-//                       backgroundColor: Colors.green,
-//                       duration: Duration(seconds: 2),
-//                     ),
-//                   );
-//                 } else {
-//                   // Navigation band
-//                   _navigationStartTime = null;
-//                   _gpsSub?.cancel();
-//                   _gpsSub = null;
-
-//                   // Car marker hata do
-//                   if (_carAnnotation != null) {
-//                     _pointManager?.delete(_carAnnotation!);
-//                     _carAnnotation = null;
-//                   }
-
-//                   // Camera normal view par wapas
-//                   _mapboxMap?.setCamera(
-//                     mapbox.CameraOptions(
-//                       center: mapbox.Point(
-//                         coordinates: _currentPos ?? _defaultPos,
-//                       ),
-//                       zoom: 15,
-//                       pitch: 0,
-//                       bearing: 0,
-//                     ),
-//                   );
-
-//                   // Route refresh karo
-//                   if (_currentPos != null && _destinationPos != null) {
-//                     _getRoute(_currentPos!, _destinationPos!);
-//                   }
-//                 }
-//               },
-//               icon: const Icon(Icons.navigation_rounded),
-//               label: Text(
-//                 _startNavigation ? 'Stop Navigation' : 'Start Navigation',
-//               ),
-//               style: ElevatedButton.styleFrom(
-//                 backgroundColor: const Color(0xFF4285F4),
-//                 foregroundColor: Colors.white,
-//                 padding: const EdgeInsets.symmetric(vertical: 14),
-//                 shape: RoundedRectangleBorder(
-//                   borderRadius: BorderRadius.circular(12),
-//                 ),
-//               ),
-//             ),
-//           ),
-//           const SizedBox(height: 8),
-
-//           // Route clear button
-//           SizedBox(
-//             width: double.infinity,
-//             child: OutlinedButton.icon(
-//               onPressed: () async {
-//                 // Polylines hata do
-//                 await _polylineManager?.deleteAll();
-//                 _routeAnnotation = null;
-//                 _traveledAnnotation = null;
-
-//                 // Destination marker hata do
-//                 if (_destAnnotation != null) {
-//                   await _pointManager?.delete(_destAnnotation!);
-//                   _destAnnotation = null;
-//                 }
-
-//                 // Car marker hata do
-//                 if (_carAnnotation != null) {
-//                   await _pointManager?.delete(_carAnnotation!);
-//                   _carAnnotation = null;
-//                 }
-
-//                 // GPS band karo
-//                 _gpsSub?.cancel();
-//                 _gpsSub = null;
-
-//                 if (mounted) {
-//                   setState(() {
-//                     _destinationPos = null;
-//                     _fullRoute = [];
-//                     _routeResult = null;
-//                     _isNavigating = false;
-//                     _startNavigation = false;
-//                     _currentStepIndex = 0;
-//                     _remainingDistanceM = 0;
-//                     _arrivalTime = '';
-//                   });
-//                 }
-
-//                 // Camera wapas apni location par
-//                 _mapboxMap?.setCamera(
-//                   mapbox.CameraOptions(
-//                     center: mapbox.Point(
-//                       coordinates: _currentPos ?? _defaultPos,
-//                     ),
-//                     zoom: 15,
-//                     pitch: 0,
-//                     bearing: 0,
-//                   ),
-//                 );
-//               },
-//               icon: const Icon(Icons.close_rounded),
-//               label: const Text('Route clear karo'),
-//             ),
-//           ),
-//         ],
-//       ),
-//     );
-//   }
-
-//   // ══════════════════════════════════════════════
-//   // HELPER WIDGETS
-//   // ══════════════════════════════════════════════
-
-//   Widget _statCard({
-//     required IconData icon,
-//     required String value,
-//     required String label,
-//     required Color color,
-//     required Color valueColor,
-//     required Color iconColor,
-//   }) {
-//     return Container(
-//       padding: const EdgeInsets.all(14),
-//       decoration: BoxDecoration(
-//         color: color,
-//         borderRadius: BorderRadius.circular(12),
-//       ),
-//       child: Column(
-//         children: [
-//           Icon(icon, color: iconColor, size: 24),
-//           const SizedBox(height: 6),
-//           Text(
-//             value,
-//             style: TextStyle(
-//               fontSize: 18,
-//               fontWeight: FontWeight.bold,
-//               color: valueColor,
-//             ),
-//           ),
-//           Text(label, style: const TextStyle(fontSize: 12, color: Colors.grey)),
-//         ],
-//       ),
-//     );
-//   }
-
-//   Widget _navStat(String value, String label, {Color? color}) {
-//     return Column(
-//       children: [
-//         Text(
-//           value,
-//           style: TextStyle(
-//             color: color ?? Colors.white,
-//             fontSize: 20,
-//             fontWeight: FontWeight.bold,
-//           ),
-//         ),
-//         Text(
-//           label,
-//           style: const TextStyle(color: Colors.white54, fontSize: 11),
-//         ),
-//       ],
-//     );
-//   }
-// }
-
-// // OrsLatLng ab ors_service.dart mein define hai
-// // mapbox_screen ko koi wrapper nahi chahiye
+import 'dart:async';
+import 'dart:convert';
+import 'dart:math';
+import 'dart:typed_data';
+import 'dart:ui' as ui;
+
+import 'package:flutter/material.dart';
+import 'package:flutter_background_service/flutter_background_service.dart';
+import 'package:flutter_compass/flutter_compass.dart';
+import 'package:http/http.dart' as http;
+import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
+import 'package:mapbox_navigation/mapbox_navigation.dart';
+import 'package:ors_map_test/services/api_key_service.dart';
+import 'package:ors_map_test/services/background_nav_services.dart';
+import 'package:ors_map_test/services/tts_service.dart';
+
+class MapboxTestScreen extends StatefulWidget {
+  const MapboxTestScreen({super.key});
+
+  @override
+  State<MapboxTestScreen> createState() => _MapboxTestScreenState();
+}
+
+class _MapboxTestScreenState extends State<MapboxTestScreen> {
+  static const Color _accentBlue = Color(0xFF2563EB);
+  static const Color _successGreen = Color(0xFF16A34A);
+  static const Color _warningAmber = Color(0xFFFACC15);
+  static const Color _ink = Color(0xFF0F172A);
+  static const Color _mutedInk = Color(0xFF64748B);
+  static const Color _panelBorder = Color(0xFFE2E8F0);
+  static const double _panelRadius = 8.0;
+
+  mapbox.MapboxMap? _mapboxMap;
+  mapbox.PointAnnotationManager? _annotationManager;
+  mapbox.PointAnnotation? _destinationMarker;
+
+  late final NavigationController _navigationController;
+  final NavigationCameraController _cameraController =
+      NavigationCameraController();
+  StreamSubscription<NavigationState>? _navigationStateSub;
+  StreamSubscription<NavigationEvent>? _navigationEventSub;
+  StreamSubscription<CompassEvent>? _compassSub;
+
+  final TextEditingController _searchController = TextEditingController();
+  final FocusNode _searchFocusNode = FocusNode();
+  final TtsService _tts = TtsService();
+
+  double _compassHeading = 0.0;
+  bool _ttsEnabled = true;
+  bool _isNavCardExpanded = false;
+  bool _isSearching = false;
+  String? _searchError;
+  List<_SearchPlace> _searchResults = [];
+  Timer? _searchDebounce;
+  int _searchRequestId = 0;
+
+  NavigationRoute? get _activeRoute => _navigationController.state.activeRoute;
+  bool get _isNavigating =>
+      _navigationController.state.status == NavigationStatus.navigating;
+
+  String get _currentInstruction {
+    final state = _navigationController.state;
+    if (state.routeRequestStatus == RouteRequestStatus.rerouting) {
+      return 'Rerouting, please wait...';
+    }
+    if (state.routeRequestStatus == RouteRequestStatus.loading &&
+        state.status == NavigationStatus.starting) {
+      return 'Finding route from current location...';
+    }
+    if (state.currentStep != null) {
+      return state.currentStep!.instruction;
+    }
+    if (state.activeRoute?.steps.isNotEmpty == true) {
+      return state.activeRoute!.steps.first.instruction;
+    }
+    return '';
+  }
+
+  int? get _currentSpeedLimit =>
+      _navigationController.state.currentStep?.speedLimitKmh;
+
+  List<NavigationStep> get _upcomingSteps {
+    final state = _navigationController.state;
+    final route = state.activeRoute;
+    if (route == null || route.steps.isEmpty) return const [];
+    final idx = state.currentStepIndex ?? 0;
+    return route.steps.skip(idx).take(3).toList();
+  }
+
+  DateTime? get _estimatedArrival {
+    final state = _navigationController.state;
+    final duration = state.remainingDurationSeconds;
+    if (duration != null) {
+      return DateTime.now().add(Duration(seconds: duration.toInt()));
+    }
+    return null;
+  }
+
+  String get _remainingDistanceText {
+    final meters =
+        _navigationController.state.remainingDistanceMeters ??
+        _activeRoute?.totalDistanceMeters ??
+        0.0;
+    return _formatDistance(meters);
+  }
+
+  @override
+  void initState() {
+    super.initState();
+    _startCompass();
+    _initNavigation();
+  }
+
+  void _initNavigation() {
+    _navigationController = NavigationController(
+      routeProvider: MapboxRouteProvider(
+        accessToken: ApiKeyService.mapboxAccessToken,
+      ),
+      locationSource: const GeolocatorLocationSource(),
+    );
+
+    _navigationStateSub = _navigationController.states.listen((state) {
+      if (mounted) setState(() {});
+    });
+
+    _navigationEventSub =
+        _navigationController.events.listen(_onNavigationEvent);
+  }
+
+  void _onNavigationEvent(NavigationEvent event) {
+    if (!mounted) return;
+    switch (event) {
+      case InstructionChangedEvent(:final step):
+        _safeSpeak(step.instruction);
+        FlutterBackgroundService().invoke('updateInstruction', {
+          'instruction': step.instruction,
+          'distance': _remainingDistanceText,
+        });
+      case RerouteStartedEvent():
+        _safeSpeak('Rerouting, please wait');
+      case RerouteFailedEvent(:final reason):
+        debugPrint('Reroute failed: $reason');
+      case DestinationReachedEvent():
+        _safeSpeak('You have reached your destination!');
+        _clearAll();
+        _showArrivalDialog();
+      case NavigationErrorEvent(:final error):
+        debugPrint('Navigation error: ${error.message}');
+    }
+  }
+
+  void _showArrivalDialog() {
+    showDialog<void>(
+      context: context,
+      builder:
+          (_) => AlertDialog(
+            title: const Text('🎉 Destination Reached!'),
+            content: const Text('You have arrived at your destination.'),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(),
+                child: const Text('Done'),
+              ),
+            ],
+          ),
+    );
+  }
+
+  void _startCompass() {
+    _compassSub = FlutterCompass.events?.listen((event) {
+      final heading = event.heading;
+      if (heading == null || heading.isNaN) return;
+      if (!mounted) return;
+      setState(() => _compassHeading = (heading + 360) % 360);
+    });
+  }
+
+  void _safeSpeak(String text) {
+    if (_ttsEnabled) _tts.speak(text);
+  }
+
+  Future<void> _buildRouteToDestination(GeoPoint destination) async {
+    final current =
+        _navigationController.state.rawFix?.coordinate ??
+        const GeoPoint(latitude: 33.6844, longitude: 73.0479);
+
+    try {
+      final route = await _navigationController.calculateRoute(
+        origin: current,
+        destination: destination,
+      );
+      await _navigationController.startPreview(
+        route: route,
+        destination: destination,
+      );
+      await _addDestinationMarker(
+        mapbox.Position(destination.longitude, destination.latitude),
+      );
+      if (mounted) setState(() {});
+    } catch (e) {
+      debugPrint('Route error: $e');
+    }
+  }
+
+  void _startNavigation() async {
+    unawaited(
+      initBackgroundService().then(
+        (_) => FlutterBackgroundService().startService(),
+      ),
+    );
+
+    final route = _navigationController.state.activeRoute;
+    final dest = _navigationController.state.destination;
+    if (route == null || dest == null) return;
+
+    if (route.steps.isNotEmpty) {
+      _safeSpeak(route.steps.first.instruction);
+    }
+
+    await _navigationController.startNavigation(
+      route: route,
+      destination: dest,
+    );
+
+    if (mounted) setState(() {});
+  }
+
+  void _stopNavigation() {
+    _navigationController.stopNavigation();
+    _tts.stop();
+    _clearAll();
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _clearAll() async {
+    if (_destinationMarker != null && _annotationManager != null) {
+      await _annotationManager!.delete(_destinationMarker!);
+      _destinationMarker = null;
+    }
+    if (mounted) {
+      setState(() {
+        _isNavCardExpanded = false;
+      });
+    }
+  }
+
+  Future<void> _recenterNavigation() async {
+    final current = _navigationController.state.rawFix?.coordinate;
+    final bearing = _navigationController.state.bearingDegrees;
+    await _cameraController.recenter(
+      currentPosition: current,
+      currentBearing: bearing,
+    );
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _toggleRouteOverview() async {
+    final current = _navigationController.state.rawFix?.coordinate;
+    final dest = _navigationController.state.destination;
+    final map = _mapboxMap;
+    if (current == null || dest == null || map == null) return;
+
+    if (!_cameraController.isOverview) {
+      await _cameraController.showRouteOverview(
+        from: current,
+        to: dest,
+      );
+      if (mounted) setState(() {});
+    } else {
+      final bearing = _navigationController.state.bearingDegrees;
+      await _cameraController.exitOverview(
+        currentPosition: current,
+        currentBearing: bearing,
+      );
+      if (mounted) setState(() {});
+    }
+  }
+
+  Future<void> _addDestinationMarker(mapbox.Position position) async {
+    if (_annotationManager == null) return;
+
+    if (_destinationMarker != null) {
+      await _annotationManager!.delete(_destinationMarker!);
+    }
+
+    final markerImage = await _createMarkerImage();
+    _destinationMarker = await _annotationManager!.create(
+      mapbox.PointAnnotationOptions(
+        geometry: mapbox.Point(coordinates: position),
+        image: markerImage,
+        iconSize: 1.0,
+        iconAnchor: mapbox.IconAnchor.CENTER,
+      ),
+    );
+  }
+
+  Future<Uint8List> _createMarkerImage() async {
+    const size = 80.0;
+    final recorder = ui.PictureRecorder();
+    final canvas = Canvas(recorder);
+
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      24,
+      Paint()..color = Colors.red,
+    );
+    canvas.drawCircle(
+      const Offset(size / 2, size / 2),
+      24,
+      Paint()
+        ..color = Colors.white
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 4,
+    );
+
+    final image = await recorder.endRecording().toImage(
+      size.toInt(),
+      size.toInt(),
+    );
+    final bytes = await image.toByteData(format: ui.ImageByteFormat.png);
+    return bytes!.buffer.asUint8List();
+  }
+
+  Future<void> _configureMapStyle() async {
+    final style = _mapboxMap?.style;
+    if (style == null) return;
+
+    final configs = <String, Object>{
+      'lightPreset': 'dusk',
+      'show3dObjects': true,
+      'showRoadLabels': true,
+      'showTransitLabels': false,
+      'showPointOfInterestLabels': false,
+    };
+
+    for (final entry in configs.entries) {
+      try {
+        await style.setStyleImportConfigProperty(
+          'basemap',
+          entry.key,
+          entry.value,
+        );
+      } catch (_) {}
+    }
+  }
+
+  void _onSearchChanged(String query) {
+    _searchDebounce?.cancel();
+    final trimmed = query.trim();
+
+    if (trimmed.length < 2) {
+      setState(() {
+        _searchResults = [];
+        _searchError = null;
+        _isSearching = false;
+      });
+      return;
+    }
+
+    setState(() {
+      _isSearching = true;
+      _searchError = null;
+    });
+
+    _searchDebounce = Timer(
+      const Duration(milliseconds: 350),
+      () => _searchPlaces(trimmed),
+    );
+  }
+
+  Future<void> _searchPlaces(String query) async {
+    final requestId = ++_searchRequestId;
+    final token = ApiKeyService.mapboxAccessToken;
+    if (token.isEmpty) {
+      if (!mounted || requestId != _searchRequestId) return;
+      setState(() {
+        _isSearching = false;
+        _searchError = 'Mapbox token is missing';
+      });
+      return;
+    }
+
+    final rawLoc = _navigationController.state.rawFix?.coordinate;
+    final proximity =
+        rawLoc != null ? '&proximity=${rawLoc.longitude},${rawLoc.latitude}' : '';
+    final uri = Uri.parse(
+      'https://api.mapbox.com/geocoding/v5/mapbox.places/${Uri.encodeComponent(query)}.json'
+      '?access_token=$token&autocomplete=true&limit=5$proximity',
+    );
+
+    try {
+      final response = await http.get(uri);
+      if (!mounted || requestId != _searchRequestId) return;
+
+      if (response.statusCode != 200) {
+        setState(() {
+          _isSearching = false;
+          _searchError = 'Search failed (${response.statusCode})';
+        });
+        return;
+      }
+
+      final data = jsonDecode(response.body) as Map<String, dynamic>;
+      final features = data['features'] as List? ?? const [];
+      final places =
+          features
+              .map(
+                (f) => _SearchPlace.fromJson(
+                  (f as Map).cast<String, dynamic>(),
+                ),
+              )
+              .whereType<_SearchPlace>()
+              .toList();
+
+      setState(() {
+        _isSearching = false;
+        _searchResults = places;
+        _searchError = places.isEmpty ? 'No places found' : null;
+      });
+    } catch (_) {
+      if (!mounted || requestId != _searchRequestId) return;
+      setState(() {
+        _isSearching = false;
+        _searchError = 'Search error';
+      });
+    }
+  }
+
+  void _clearSearch() {
+    _searchController.clear();
+    setState(() {
+      _searchResults = [];
+      _searchError = null;
+      _isSearching = false;
+    });
+  }
+
+  Future<void> _selectSearchPlace(_SearchPlace place) async {
+    _searchFocusNode.unfocus();
+    _searchController.text = place.title;
+    setState(() {
+      _searchResults = [];
+      _searchError = null;
+      _isSearching = false;
+    });
+
+    final destination = GeoPoint(latitude: place.lat, longitude: place.lng);
+    await _buildRouteToDestination(destination);
+  }
+
+  @override
+  void dispose() {
+    _navigationStateSub?.cancel();
+    _navigationEventSub?.cancel();
+    _compassSub?.cancel();
+    _navigationController.dispose();
+    _cameraController.dispose();
+    _tts.stop();
+    _searchDebounce?.cancel();
+    _searchController.dispose();
+    _searchFocusNode.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      body: SafeArea(
+        top: false,
+        bottom: false,
+        child: Stack(
+          children: [
+            // Pure package NavigationMapView
+            NavigationMapView(
+              controller: _navigationController,
+              accessToken: ApiKeyService.mapboxAccessToken,
+              vehicle: const VehicleAppearance.model3D(
+                modelUri: 'asset://assets/lowpoly_car.glb',
+                scale: 0.05,
+                bearingOffset: 180.0,
+              ),
+              routeTheme: const MapboxRouteTheme(),
+              cameraController: _cameraController,
+              onMapCreated: (controller) async {
+                _mapboxMap = controller;
+                _annotationManager =
+                    await controller.annotations.createPointAnnotationManager();
+                await _configureMapStyle();
+              },
+              onMapTap: (point) async {
+                if (_isNavigating) _stopNavigation();
+                await _buildRouteToDestination(
+                  GeoPoint(
+                    latitude: point.lat.toDouble(),
+                    longitude: point.lng.toDouble(),
+                  ),
+                );
+              },
+            ),
+
+            if (!_isNavigating)
+              Positioned(
+                top: 10,
+                left: 16,
+                right: 16,
+                child: _buildSearchPanel(),
+              ),
+
+            Positioned(
+              top:
+                  MediaQuery.of(context).padding.top +
+                  (_isNavigating ? 96 : 98),
+              right: 16,
+              child: _buildCompassButton(),
+            ),
+
+            if (_isNavigating)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 162,
+                right: 16,
+                child: _buildTtsButton(),
+              ),
+
+            if (_isNavigating)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 228,
+                right: 16,
+                child: _buildRouteOverviewButton(),
+              ),
+
+            if (_isNavigating && !_cameraController.isFollowing)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 294,
+                right: 16,
+                child: _buildRecenterButton(),
+              ),
+
+            if (_isNavigating && _currentInstruction.isNotEmpty)
+              Positioned(
+                top: MediaQuery.of(context).padding.top + 12,
+                left: 16,
+                right: 16,
+                child: _buildNavCard(),
+              ),
+
+            if (_isNavigating)
+              Positioned(
+                bottom: 40,
+                left: 16,
+                right: 16,
+                child: _buildBottomBar(),
+              ),
+
+            if (_isNavigating)
+              Positioned(bottom: 130, left: 16, child: _buildSpeedLimitSign()),
+
+            if (_activeRoute != null && !_isNavigating)
+              Positioned(
+                bottom: 40,
+                left: 16,
+                right: 16,
+                child: _buildStartButton(),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  BoxDecoration _panelDecoration({
+    Color color = Colors.white,
+    Color borderColor = _panelBorder,
+    double shadowAlpha = 0.14,
+  }) {
+    return BoxDecoration(
+      color: color,
+      borderRadius: BorderRadius.circular(_panelRadius),
+      border: Border.all(color: borderColor),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withValues(alpha: shadowAlpha),
+          blurRadius: 22,
+          offset: const Offset(0, 10),
+        ),
+      ],
+    );
+  }
+
+  Widget _frostedPanel({
+    required Widget child,
+    Color color = Colors.white,
+    Color borderColor = _panelBorder,
+    double shadowAlpha = 0.14,
+  }) {
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(_panelRadius),
+      child: BackdropFilter(
+        filter: ui.ImageFilter.blur(sigmaX: 14, sigmaY: 14),
+        child: DecoratedBox(
+          decoration: _panelDecoration(
+            color: color,
+            borderColor: borderColor,
+            shadowAlpha: shadowAlpha,
+          ),
+          child: child,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildSearchPanel() {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _frostedPanel(
+          color: Colors.white.withValues(alpha: 0.94),
+          child: TextField(
+            controller: _searchController,
+            focusNode: _searchFocusNode,
+            onChanged: _onSearchChanged,
+            textInputAction: TextInputAction.search,
+            onSubmitted: (value) {
+              if (_searchResults.isNotEmpty) {
+                _selectSearchPlace(_searchResults.first);
+              } else {
+                _onSearchChanged(value);
+              }
+            },
+            decoration: InputDecoration(
+              hintText: 'Search destination',
+              hintStyle: const TextStyle(
+                color: _mutedInk,
+                fontWeight: FontWeight.w500,
+              ),
+              prefixIcon: const Icon(Icons.search_rounded, color: _ink),
+              suffixIcon:
+                  _isSearching
+                      ? const Padding(
+                        padding: EdgeInsets.all(14),
+                        child: SizedBox(
+                          width: 18,
+                          height: 18,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      )
+                      : _searchController.text.isNotEmpty
+                      ? IconButton(
+                        onPressed: _clearSearch,
+                        icon: const Icon(Icons.close_rounded),
+                        color: _mutedInk,
+                      )
+                      : null,
+              border: InputBorder.none,
+              enabledBorder: InputBorder.none,
+              focusedBorder: InputBorder.none,
+              contentPadding: const EdgeInsets.symmetric(
+                horizontal: 16,
+                vertical: 16,
+              ),
+            ),
+            style: const TextStyle(
+              color: _ink,
+              fontSize: 15,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+        if (_searchResults.isNotEmpty || _searchError != null)
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: _frostedPanel(
+              color: Colors.white.withValues(alpha: 0.96),
+              shadowAlpha: 0.12,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(maxHeight: 320),
+                child:
+                    _searchResults.isNotEmpty
+                        ? ListView.separated(
+                          padding: EdgeInsets.zero,
+                          shrinkWrap: true,
+                          itemCount: _searchResults.length,
+                          separatorBuilder:
+                              (_, __) => Divider(
+                                height: 1,
+                                color: _panelBorder.withValues(alpha: 0.8),
+                              ),
+                          itemBuilder: (context, index) {
+                            final place = _searchResults[index];
+                            return ListTile(
+                              minVerticalPadding: 12,
+                              leading: Container(
+                                width: 36,
+                                height: 36,
+                                decoration: BoxDecoration(
+                                  color: _accentBlue.withValues(alpha: 0.1),
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                                child: const Icon(
+                                  Icons.place_rounded,
+                                  color: _accentBlue,
+                                  size: 20,
+                                ),
+                              ),
+                              title: Text(
+                                place.title,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: _ink,
+                                  fontWeight: FontWeight.w700,
+                                  fontSize: 14,
+                                ),
+                              ),
+                              subtitle: Text(
+                                place.subtitle,
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(
+                                  color: _mutedInk,
+                                  fontSize: 12,
+                                  fontWeight: FontWeight.w500,
+                                ),
+                              ),
+                              onTap: () => _selectSearchPlace(place),
+                            );
+                          },
+                        )
+                        : Padding(
+                          padding: const EdgeInsets.all(16),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.info_outline_rounded,
+                                color: _mutedInk,
+                                size: 18,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  _searchError ?? '',
+                                  style: const TextStyle(
+                                    color: _mutedInk,
+                                    fontSize: 13,
+                                    fontWeight: FontWeight.w500,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+
+  Widget _buildCompassButton() {
+    return _frostedPanel(
+      color: Colors.white.withValues(alpha: 0.94),
+      child: IconButton(
+        onPressed: _recenterNavigation,
+        icon: Transform.rotate(
+          angle: -_compassHeading * pi / 180,
+          child: const Icon(Icons.navigation, color: Colors.red),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTtsButton() {
+    return _frostedPanel(
+      color: Colors.white.withValues(alpha: 0.94),
+      child: IconButton(
+        onPressed: () {
+          setState(() => _ttsEnabled = !_ttsEnabled);
+          if (!_ttsEnabled) _tts.stop();
+        },
+        icon: Icon(
+          _ttsEnabled ? Icons.volume_up_rounded : Icons.volume_off_rounded,
+          color: _ttsEnabled ? _accentBlue : _mutedInk,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRouteOverviewButton() {
+    return _frostedPanel(
+      color: Colors.white.withValues(alpha: 0.94),
+      child: IconButton(
+        onPressed: _toggleRouteOverview,
+        icon: Icon(
+          _cameraController.isOverview ? Icons.navigation_rounded : Icons.alt_route_rounded,
+          color: _cameraController.isOverview ? _warningAmber : _accentBlue,
+        ),
+      ),
+    );
+  }
+
+  Widget _buildRecenterButton() {
+    return _frostedPanel(
+      color: Colors.white.withValues(alpha: 0.94),
+      child: IconButton(
+        onPressed: _recenterNavigation,
+        icon: const Icon(Icons.my_location_rounded, color: _accentBlue),
+      ),
+    );
+  }
+
+  Widget _buildNavCard() {
+    final nextStep =
+        _upcomingSteps.length > 1 ? _upcomingSteps[1] : null;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        _frostedPanel(
+          color: const Color(0xFF0F172A).withValues(alpha: 0.92),
+          borderColor: Colors.white.withValues(alpha: 0.12),
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Container(
+                      width: 44,
+                      height: 44,
+                      decoration: BoxDecoration(
+                        color: _accentBlue,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: const Icon(
+                        Icons.turn_right_rounded,
+                        color: Colors.white,
+                        size: 28,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            _remainingDistanceText,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 22,
+                              fontWeight: FontWeight.w800,
+                            ),
+                          ),
+                          const SizedBox(height: 2),
+                          Text(
+                            _currentInstruction,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(
+                              color: Colors.white70,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                    if (_upcomingSteps.length > 1)
+                      IconButton(
+                        onPressed: () {
+                          setState(() {
+                            _isNavCardExpanded = !_isNavCardExpanded;
+                          });
+                        },
+                        icon: Icon(
+                          _isNavCardExpanded
+                              ? Icons.expand_less_rounded
+                              : Icons.expand_more_rounded,
+                          color: Colors.white70,
+                        ),
+                      ),
+                  ],
+                ),
+                if (nextStep != null && !_isNavCardExpanded) ...[
+                  const SizedBox(height: 8),
+                  Divider(
+                    height: 1,
+                    color: Colors.white.withValues(alpha: 0.12),
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    'Then: ${nextStep.instruction}',
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: const TextStyle(
+                      color: Colors.white54,
+                      fontSize: 12,
+                      fontWeight: FontWeight.w600,
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSpeedLimitSign() {
+    final limit = _currentSpeedLimit;
+    if (limit == null) return const SizedBox.shrink();
+
+    return Container(
+      width: 48,
+      height: 48,
+      decoration: BoxDecoration(
+        color: Colors.white,
+        shape: BoxShape.circle,
+        border: Border.all(color: Colors.red, width: 4),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.15),
+            blurRadius: 8,
+          ),
+        ],
+      ),
+      child: Center(
+        child: Text(
+          '$limit',
+          style: const TextStyle(
+            color: Colors.black,
+            fontSize: 16,
+            fontWeight: FontWeight.w900,
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildBottomBar() {
+    final arrival = _estimatedArrival;
+    final timeStr =
+        arrival != null
+            ? '${arrival.hour % 12 == 0 ? 12 : arrival.hour % 12}:${arrival.minute.toString().padLeft(2, '0')} ${arrival.hour >= 12 ? 'PM' : 'AM'}'
+            : '--:--';
+    final remainingDuration =
+        _navigationController.state.remainingDurationSeconds;
+    final minStr =
+        remainingDuration != null ? '${(remainingDuration / 60).round()} min' : '';
+
+    return _frostedPanel(
+      color: const Color(0xFF0F172A).withValues(alpha: 0.94),
+      borderColor: Colors.white.withValues(alpha: 0.12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  timeStr,
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 20,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                Text(
+                  '$minStr • $_remainingDistanceText',
+                  style: const TextStyle(
+                    color: Colors.white70,
+                    fontSize: 12,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ],
+            ),
+            ElevatedButton(
+              onPressed: _stopNavigation,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.red,
+                foregroundColor: Colors.white,
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(8),
+                ),
+              ),
+              child: const Text('End'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildStartButton() {
+    return _frostedPanel(
+      color: Colors.white.withValues(alpha: 0.96),
+      child: Padding(
+        padding: const EdgeInsets.all(6),
+        child: Material(
+          color: _successGreen,
+          borderRadius: BorderRadius.circular(_panelRadius),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(_panelRadius),
+            onTap: _startNavigation,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+              child: Row(
+                children: [
+                  Container(
+                    width: 38,
+                    height: 38,
+                    decoration: BoxDecoration(
+                      color: Colors.white.withValues(alpha: 0.16),
+                      borderRadius: BorderRadius.circular(8),
+                    ),
+                    child: const Icon(
+                      Icons.navigation_rounded,
+                      color: Colors.white,
+                      size: 22,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Text(
+                          'Start navigation',
+                          style: TextStyle(
+                            color: Colors.white,
+                            fontSize: 16,
+                            fontWeight: FontWeight.w800,
+                          ),
+                        ),
+                        if ((_activeRoute?.durationText ?? '').isNotEmpty)
+                          Text(
+                            _activeRoute!.durationText,
+                            style: TextStyle(
+                              color: Colors.white.withValues(alpha: 0.76),
+                              fontSize: 12,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                  const Icon(
+                    Icons.arrow_forward_rounded,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  String _formatDistance(double meters) {
+    if (meters >= 1000) return '${(meters / 1000).toStringAsFixed(1)} km';
+    return '${meters.round()} m';
+  }
+}
+
+class _SearchPlace {
+  final String title;
+  final String subtitle;
+  final double lat;
+  final double lng;
+
+  const _SearchPlace({
+    required this.title,
+    required this.subtitle,
+    required this.lat,
+    required this.lng,
+  });
+
+  static _SearchPlace? fromJson(Map<String, dynamic> json) {
+    final center = json['center'];
+    if (center is! List || center.length < 2) return null;
+
+    final lng = (center[0] as num?)?.toDouble();
+    final lat = (center[1] as num?)?.toDouble();
+    if (lat == null || lng == null) return null;
+
+    final title =
+        (json['text'] ?? json['place_name'] ?? 'Destination').toString();
+    final placeName = (json['place_name'] ?? title).toString();
+    final subtitle =
+        placeName == title
+            ? (json['place_type'] as List? ?? const [])
+                .map((type) => type.toString())
+                .join(', ')
+            : placeName;
+
+    return _SearchPlace(title: title, subtitle: subtitle, lat: lat, lng: lng);
+  }
+}

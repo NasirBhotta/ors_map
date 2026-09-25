@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart';
-import 'package:ors_map_test/presentation/map_box_screen_duplicate.dart';
+import 'package:ors_map_test/presentation/map_box_screen.dart';
 import 'package:ors_map_test/services/api_key_service.dart';
 
 void main() async {

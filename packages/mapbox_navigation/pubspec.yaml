@@ -1,0 +1,21 @@
+name: mapbox_navigation
+description: "A reusable Flutter navigation layer for building custom Mapbox navigation experiences."
+version: 0.1.0-dev.1
+publish_to: 'none'
+
+environment:
+  sdk: ^3.7.0
+  flutter: ">=3.24.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  meta: ^1.15.0
+  mapbox_maps_flutter: 2.25.0
+  http: ^1.6.0
+  geolocator: ^14.0.2
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^5.0.0
