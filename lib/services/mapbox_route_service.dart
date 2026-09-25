@@ -5,7 +5,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:ors_map_test/services/api_key_service.dart';
 
-class MapboxStep {
+final class MapboxStep {
   final String instruction;
   final double distance; // meters
   final double duration; // seconds
@@ -16,9 +16,12 @@ class MapboxStep {
     required this.instruction,
     required this.distance,
     required this.duration,
-    this.maneuverLocation,
+    List<double>? maneuverLocation,
     this.speedLimitKmh,
-  });
+  }) : maneuverLocation =
+           maneuverLocation == null
+               ? null
+               : List<double>.unmodifiable(maneuverLocation);
 
   factory MapboxStep.fromJson(Map<String, dynamic> json) {
     final maneuver = json['maneuver'] as Map<String, dynamic>?;
@@ -49,18 +52,21 @@ class MapboxStep {
   }
 }
 
-class MapboxRouteResult {
+final class MapboxRouteResult {
   final List<List<double>> coordinates; // [[lng, lat], ...]
   final double distanceMeters;
   final double durationSeconds;
   final List<MapboxStep> steps;
 
   MapboxRouteResult({
-    required this.coordinates,
+    required List<List<double>> coordinates,
     required this.distanceMeters,
     required this.durationSeconds,
-    required this.steps,
-  });
+    required List<MapboxStep> steps,
+  }) : coordinates = List<List<double>>.unmodifiable(
+         coordinates.map((coordinate) => List<double>.unmodifiable(coordinate)),
+       ),
+       steps = List<MapboxStep>.unmodifiable(steps);
 
   String get distanceText {
     if (distanceMeters >= 1000) {

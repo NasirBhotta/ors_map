@@ -11,18 +11,55 @@ import 'package:flutter_compass/flutter_compass.dart';
 import 'package:geolocator/geolocator.dart' as geolocator;
 import 'package:http/http.dart' as http;
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
+import 'package:ors_map_test/models/navigation_state.dart';
 import 'package:ors_map_test/services/background_nav_services.dart';
 import 'package:ors_map_test/services/map_box_drawing_service.dart';
 import 'package:ors_map_test/services/map_box_navigation_service.dart';
 import 'package:ors_map_test/services/api_key_service.dart';
 import 'package:ors_map_test/services/mapbox_route_service.dart';
 import 'package:ors_map_test/services/tts_service.dart';
+import 'package:ors_map_test/services/mapbox_route_render_coordinator.dart';
 
 class MapboxTestScreen extends StatefulWidget {
   const MapboxTestScreen({super.key});
 
   @override
   State<MapboxTestScreen> createState() => _MapboxTestScreenState();
+}
+
+class _MapboxRouteDrawingDelegate implements RouteRenderDelegate {
+  final mapbox.MapboxMap Function() getMap;
+  final Future<void> Function() onPostDraw;
+
+  _MapboxRouteDrawingDelegate({
+    required this.getMap,
+    required this.onPostDraw,
+  });
+
+  @override
+  Future<void> drawRoute(MapboxRouteResult route) async {
+    final map = getMap();
+    final drawing = MapboxDrawingService(mapboxMap: map);
+    await drawing.drawRoute(route);
+    await onPostDraw();
+  }
+
+  @override
+  Future<void> clearRoute() async {
+    final map = getMap();
+    final drawing = MapboxDrawingService(mapboxMap: map);
+    await drawing.clearRoute();
+  }
+
+  @override
+  Future<void> updateRouteProgress(
+    MapboxRouteResult route,
+    double distanceAlongRouteMeters,
+  ) async {
+    final map = getMap();
+    final drawing = MapboxDrawingService(mapboxMap: map);
+    await drawing.updateRouteProgressByDistance(route, distanceAlongRouteMeters);
+  }
 }
 
 class _MapboxTestScreenState extends State<MapboxTestScreen> {
@@ -50,19 +87,88 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   mapbox.MapboxMap? _mapboxMap;
   mapbox.Position? _currentPosition;
   bool _suppressFollowCamera = false;
-  MapboxRouteResult? _activeRoute;
-  mapbox.Position? _activeDestination;
 
   MapboxNavigationService? _navService;
-  bool _isNavigating = false;
+  StreamSubscription<NavigationState>? _navigationStateSub;
+  MapboxRouteRenderCoordinator? _routeRenderer;
+
+  MapboxRouteResult? get _activeRoute => _navService?.state.activeRoute;
+  mapbox.Position? get _activeDestination {
+    final d = _navService?.state.destination;
+    if (d == null) return null;
+    return mapbox.Position(d.longitude, d.latitude);
+  }
+  bool get _isNavigating =>
+      _navService?.state.status == NavigationStatus.navigating;
+
+  String get _currentInstruction {
+    final state = _navService?.state;
+    if (state == null) return '';
+    if (state.routeRequestStatus == RouteRequestStatus.rerouting) {
+      return 'Rerouting, please wait...';
+    }
+    if (state.routeRequestStatus == RouteRequestStatus.loading &&
+        state.status == NavigationStatus.starting) {
+      return 'Finding route from current location...';
+    }
+    if (state.currentStep != null) {
+      return state.currentStep!.instruction;
+    }
+    if (state.activeRoute?.steps.isNotEmpty == true) {
+      return state.activeRoute!.steps.first.instruction;
+    }
+    return '';
+  }
+
+  int? get _currentSpeedLimit {
+    final state = _navService?.state;
+    if (state == null || state.status != NavigationStatus.navigating) {
+      return null;
+    }
+    return state.currentStep?.speedLimitKmh ??
+        (state.activeRoute?.steps.isNotEmpty == true
+            ? state.activeRoute!.steps.first.speedLimitKmh
+            : null);
+  }
+
+  List<MapboxStep> get _upcomingSteps {
+    final state = _navService?.state;
+    final route = state?.activeRoute;
+    if (route == null || route.steps.isEmpty) return const [];
+    final idx = state?.currentStepIndex ?? 0;
+    return route.steps.skip(idx).take(3).toList();
+  }
+
+  DateTime? get _estimatedArrival {
+    final state = _navService?.state;
+    if (state == null) return null;
+    final duration = state.remainingDurationSeconds;
+    if (duration != null) {
+      return DateTime.now().add(Duration(seconds: duration.toInt()));
+    }
+    final route = state.activeRoute;
+    if (route != null) {
+      return DateTime.now().add(
+        Duration(seconds: route.durationSeconds.toInt()),
+      );
+    }
+    return null;
+  }
+
+  String get _remainingDistanceText {
+    final state = _navService?.state;
+    if (state == null) return '--';
+    final remaining = state.remainingDistanceMeters;
+    if (remaining != null) return _formatDistance(remaining);
+    final route = state.activeRoute;
+    if (route != null) return route.distanceText;
+    return '--';
+  }
+
+  bool _initialLocationCameraMoved = false;
   bool _isFollowingCamera = true;
-  String _currentInstruction = '';
   double _currentSpeedKmh = 0.0;
-  int? _currentSpeedLimit;
-  List<MapboxStep> _upcomingSteps = [];
   bool _isNavCardExpanded = false;
-  DateTime? _estimatedArrival;
-  String _remainingDistanceText = '--';
   bool _ttsEnabled = true;
   bool _showingRouteOverview = false;
   bool _carModelUsingOverviewScale = false;
@@ -98,8 +204,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   bool _carModelRebuildInFlight = false;
   DateTime? _lastCameraFollowAt;
   bool _cameraFollowInFlight = false;
-  DateTime? _lastRouteProgressPaintAt;
-  bool _routeProgressPaintInFlight = false;
   final List<double> _displayRouteDistanceAtIndex = [];
 
   StreamSubscription<CompassEvent>? _compassSub;
@@ -125,6 +229,10 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _searchFocusNode.dispose();
     _compassSub?.cancel();
     _tts.stop();
+    _navigationStateSub?.cancel();
+    _navigationStateSub = null;
+    _routeRenderer?.dispose();
+    _routeRenderer = null;
     _navService?.dispose();
     super.dispose();
   }
@@ -146,10 +254,19 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
               onStyleLoadedListener: (_) async {
                 await _configureMapStyle();
                 await _setupLocationPuck();
-                _startLocationUpdates();
+                if (_routeRenderer != null && _mapboxMap != null) {
+                  await _routeRenderer!.onStyleReloaded(_navService?.state);
+                  if (_isNavigating && _displayCarPosition != null) {
+                    await _setupNavigationCarModel(
+                      position: _displayCarPosition!,
+                      bearing: _displayCarBearing ?? _mapBearing,
+                    );
+                  }
+                }
               },
               onMapCreated: (controller) async {
                 _mapboxMap = controller;
+                _ensureNavigationService();
                 _annotationManager =
                     await controller.annotations.createPointAnnotationManager();
 
@@ -190,6 +307,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
                     await _buildRouteToDestination(tapped);
                   }),
                 );
+                unawaited(_startLocationUpdates());
               },
             ),
 
@@ -559,35 +677,43 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     final map = _mapboxMap;
     if (current == null || map == null) return;
 
-    final result = await MapboxRouteService.getRoute(
-      fromLng: current.lng.toDouble(),
-      fromLat: current.lat.toDouble(),
-      toLng: destination.lng.toDouble(),
-      toLat: destination.lat.toDouble(),
+    _ensureNavigationService();
+    final navigation = _navService;
+    if (navigation == null) return;
+    final committed = await navigation.requestPreviewRoute(
+      origin: NavigationCoordinate(
+        current.lng.toDouble(),
+        current.lat.toDouble(),
+      ),
+      destination: NavigationCoordinate(
+        destination.lng.toDouble(),
+        destination.lat.toDouble(),
+      ),
     );
-    if (result == null) return;
+    if (!mounted || committed == null || !navigation.isCurrent(committed)) {
+      return;
+    }
+    final result = navigation.state.activeRoute!;
 
     await _addDestinationMarker(destination);
+    if (!mounted || !navigation.isCurrent(committed)) return;
 
+    await _routeRenderer?.scheduleDraw(
+      sessionId: navigation.state.sessionId,
+      routeRevision: navigation.state.routeRevision,
+      route: result,
+    );
+    if (!mounted || !navigation.isCurrent(committed)) return;
     final drawing = MapboxDrawingService(mapboxMap: map);
-    await drawing.drawRoute(result);
     await drawing.fitRouteBounds(
       fromLng: current.lng.toDouble(),
       fromLat: current.lat.toDouble(),
       toLng: destination.lng.toDouble(),
       toLat: destination.lat.toDouble(),
     );
+    if (!mounted || !navigation.isCurrent(committed)) return;
     _buildDisplayRouteMetrics(result);
-
-    setState(() {
-      _activeRoute = result;
-      _activeDestination = destination;
-      _currentInstruction = '';
-      _remainingDistanceText = result.distanceText;
-      _estimatedArrival = DateTime.now().add(
-        Duration(seconds: result.durationSeconds.toInt()),
-      );
-    });
+    setState(() {});
   }
 
   Future<void> _clearAll() async {
@@ -595,11 +721,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _resetCarAnimationState();
     _displayRouteDistanceAtIndex.clear();
 
-    final map = _mapboxMap;
-    if (map != null) {
-      final drawing = MapboxDrawingService(mapboxMap: map);
-      await drawing.clearRoute();
-    }
+    await _routeRenderer?.scheduleClear(_navService?.state.sessionId ?? 0);
 
     if (_destinationMarker != null && _annotationManager != null) {
       await _annotationManager!.delete(_destinationMarker!);
@@ -609,16 +731,162 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     await _removeCarModelLayer();
 
     setState(() {
-      _activeRoute = null;
-      _activeDestination = null;
-      _currentInstruction = '';
       _currentSpeedKmh = 0.0;
-      _currentSpeedLimit = null;
-      _upcomingSteps = [];
       _isNavCardExpanded = false;
-      _remainingDistanceText = '--';
       _showingRouteOverview = false;
     });
+  }
+
+  int? _lastRenderedRouteRevision;
+  int? _lastRenderedSessionId;
+  int? _lastAnnouncedStepIndex;
+  RouteRequestStatus _lastRequestStatus = RouteRequestStatus.idle;
+  NavigationStatus _lastStatus = NavigationStatus.idle;
+
+  void _ensureNavigationService() {
+    if (_navService != null) return;
+    final map = _mapboxMap;
+    if (map == null) return;
+
+    _routeRenderer?.dispose();
+    _routeRenderer = MapboxRouteRenderCoordinator(
+      delegate: _MapboxRouteDrawingDelegate(
+        getMap: () => _mapboxMap!,
+        onPostDraw: () => _keepCarLayerAboveRoute(),
+      ),
+      onError: (err) => debugPrint('Route rendering error: $err'),
+    );
+
+    _navService = MapboxNavigationService(
+      compassHeadingProvider: () => _compassHeading,
+    );
+
+    _navigationStateSub?.cancel();
+    _navigationStateSub = _navService!.states.listen(_onNavigationStateChanged);
+  }
+
+  void _onNavigationStateChanged(NavigationState state) {
+    if (!mounted) return;
+
+    final raw = state.rawLocation;
+    if (raw != null) {
+      final current = mapbox.Position(raw.longitude, raw.latitude);
+      _currentPosition = current;
+      if (!_initialLocationCameraMoved && !_isNavigating) {
+        _initialLocationCameraMoved = true;
+        unawaited(
+          _mapboxMap?.flyTo(
+            mapbox.CameraOptions(
+              center: mapbox.Point(coordinates: current),
+              zoom: 17.0,
+              pitch: 60.0,
+            ),
+            mapbox.MapAnimationOptions(duration: 1500),
+          ),
+        );
+      }
+    }
+
+    if (state.status == NavigationStatus.navigating) {
+      _currentSpeedKmh = state.speedMetersPerSecond * 3.6;
+      _mapBearing = state.bearing;
+
+      // Downstream vehicle display motion
+      final visualPos = state.matchedLocation != null
+          ? mapbox.Position(
+              state.matchedLocation!.longitude,
+              state.matchedLocation!.latitude,
+            )
+          : (raw != null
+              ? mapbox.Position(raw.longitude, raw.latitude)
+              : null);
+
+      if (visualPos != null) {
+        unawaited(
+          _animateNavigationCarModel(
+            targetPosition: visualPos,
+            targetBearing: state.bearing,
+            speedMps: state.speedMetersPerSecond,
+            targetRouteDistance: state.distanceAlongRouteMeters,
+          ),
+        );
+      }
+    }
+
+    // Structural route rendering coordination
+    final activeRoute = state.activeRoute;
+    if (activeRoute != null) {
+      if (state.routeRevision != _lastRenderedRouteRevision ||
+          state.sessionId != _lastRenderedSessionId) {
+        _lastRenderedRouteRevision = state.routeRevision;
+        _lastRenderedSessionId = state.sessionId;
+        _buildDisplayRouteMetrics(activeRoute);
+        _routeRenderer?.scheduleDraw(
+          sessionId: state.sessionId,
+          routeRevision: state.routeRevision,
+          route: activeRoute,
+        );
+        if (raw != null) {
+          _reseedDisplayedCarForRoute(
+            activeRoute,
+            fromPosition: mapbox.Position(raw.longitude, raw.latitude),
+          );
+        }
+      }
+
+      // Measured progress line updates (authoritative only)
+      if (state.status == NavigationStatus.navigating &&
+          state.distanceAlongRouteMeters != null) {
+        _routeRenderer?.scheduleProgressUpdate(
+          sessionId: state.sessionId,
+          routeRevision: state.routeRevision,
+          route: activeRoute,
+          distanceAlongRouteMeters: state.distanceAlongRouteMeters!,
+        );
+      }
+    } else {
+      if (_lastRenderedRouteRevision != null) {
+        _lastRenderedRouteRevision = null;
+        _routeRenderer?.scheduleClear(state.sessionId);
+      }
+    }
+
+    // Speech / Instructions
+    if (state.routeRequestStatus == RouteRequestStatus.rerouting &&
+        _lastRequestStatus != RouteRequestStatus.rerouting) {
+      _safeSpeak('Rerouting, please wait');
+    }
+
+    if (state.status == NavigationStatus.navigating) {
+      final stepIdx = state.currentStepIndex;
+      if (stepIdx != null && stepIdx != _lastAnnouncedStepIndex) {
+        _lastAnnouncedStepIndex = stepIdx;
+        final step = state.currentStep;
+        if (step != null) {
+          _safeSpeak(step.instruction);
+          FlutterBackgroundService().invoke('updateInstruction', {
+            'instruction': step.instruction,
+            'distance': _remainingDistanceText,
+          });
+        }
+      }
+    }
+
+    // Arrival handling
+    if (state.status == NavigationStatus.arrived &&
+        _lastStatus != NavigationStatus.arrived) {
+      _safeSpeak('You have reached your destination!');
+      _recenterTimer?.cancel();
+      _recenterTimer = null;
+      _clearAll();
+      _setupLocationPuck();
+      _resetCameraToCurrentLocation();
+    }
+
+    _lastRequestStatus = state.routeRequestStatus;
+    _lastStatus = state.status;
+
+    setState(() {});
   }
 
   void _startNavigation() async {
@@ -630,7 +898,14 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     var route = _activeRoute;
     final destination = _activeDestination;
     final map = _mapboxMap;
-    if (route == null || destination == null || map == null) return;
+    final navigation = _navService;
+    if (route == null ||
+        destination == null ||
+        map == null ||
+        navigation == null) {
+      return;
+    }
+    var committed = navigation.captureOwnership();
 
     _recenterTimer?.cancel();
     _recenterTimer = null;
@@ -662,6 +937,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         position: current,
         bearing: provisionalBearing,
       );
+      if (!mounted || !navigation.isCurrent(committed)) return;
       _displayCarRouteDistance = null;
       _carTargetRouteDistance = null;
       unawaited(
@@ -674,39 +950,48 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
           mapbox.MapAnimationOptions(duration: 300),
         ),
       );
-      setState(
-        () => _currentInstruction = 'Finding route from current location...',
-      );
-      final freshRoute = await MapboxRouteService.getRoute(
-        fromLng: current.lng.toDouble(),
-        fromLat: current.lat.toDouble(),
-        toLng: destination.lng.toDouble(),
-        toLat: destination.lat.toDouble(),
-      );
 
-      if (freshRoute != null && freshRoute.coordinates.length >= 2) {
+      final pending = navigation.requestNavigationRoute(
+        origin: NavigationCoordinate(
+          current.lng.toDouble(),
+          current.lat.toDouble(),
+        ),
+        destination: NavigationCoordinate(
+          destination.lng.toDouble(),
+          destination.lat.toDouble(),
+        ),
+      );
+      final requestSession = navigation.state.sessionId;
+      final freshCommit = await pending;
+      if (!mounted || navigation.state.sessionId != requestSession) return;
+
+      if (freshCommit != null && navigation.isCurrent(freshCommit)) {
+        committed = freshCommit;
+        final freshRoute = navigation.state.activeRoute!;
         route = freshRoute;
         // NOTE: routeStart ab dobara assign NAHI karna — yehi to bug tha.
-        final drawing = MapboxDrawingService(mapboxMap: map);
-        await drawing.drawRoute(freshRoute);
-        await _keepCarLayerAboveRoute();
-        setState(() {
-          _activeRoute = freshRoute;
-          _remainingDistanceText = freshRoute.distanceText;
-          _estimatedArrival = DateTime.now().add(
-            Duration(seconds: freshRoute.durationSeconds.toInt()),
-          );
-        });
+        await _routeRenderer?.scheduleDraw(
+          sessionId: navigation.state.sessionId,
+          routeRevision: navigation.state.routeRevision,
+          route: freshRoute,
+        );
+        if (!mounted || !navigation.isCurrent(committed)) return;
+        setState(() {});
+      } else if (navigation.state.status != NavigationStatus.starting ||
+          navigation.state.routeRequestStatus != RouteRequestStatus.failed) {
+        return;
+      } else {
+        committed = navigation.captureOwnership();
       }
     }
 
+    if (!mounted || !navigation.isCurrent(committed)) return;
     _buildDisplayRouteMetrics(route);
     final initialBearing = _initialRouteBearing(route);
 
     // FIX: startPosition sirf upar wale locked decision se aata hai —
     // kabhi bhi fresh route ke coordinate se overwrite nahi hota.
-    final startPosition =
-        shouldSnapToRouteStart ? (originalRouteStart ?? current) : current;
+    final startPosition = shouldSnapToRouteStart ? originalRouteStart : current;
 
     if (route.steps.isNotEmpty) {
       _safeSpeak(route.steps.first.instruction);
@@ -717,6 +1002,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         position: startPosition,
         bearing: initialBearing,
       );
+      if (!mounted || !navigation.isCurrent(committed)) return;
       _displayCarRouteDistance = shouldSnapToRouteStart ? 0.0 : null;
       _carTargetRouteDistance = shouldSnapToRouteStart ? 0.0 : null;
       await map.flyTo(
@@ -727,136 +1013,26 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         ),
         mapbox.MapAnimationOptions(duration: 1000),
       );
+      if (!mounted || !navigation.isCurrent(committed)) return;
       if (mounted) setState(() => _mapBearing = initialBearing);
     }
 
-    _navService?.dispose();
-    _navService = MapboxNavigationService(
-      mapboxMap: map,
-      compassHeadingProvider: () => _compassHeading,
-      onLocationUpdate: (
-        position,
-        speedKmh,
-        bearing,
-        visualPosition,
-        routeDistance,
-      ) {
-        final current = mapbox.Position(position.longitude, position.latitude);
-        unawaited(
-          _animateNavigationCarModel(
-            targetPosition: visualPosition,
-            targetBearing: bearing,
-            speedMps: speedKmh / 3.6,
-            targetRouteDistance: routeDistance,
-          ),
-        );
-        setState(() {
-          _currentPosition = current;
-          _currentSpeedKmh = speedKmh;
-          _mapBearing = bearing;
-        });
-      },
-      onUpcomingInstruction: (stepIndex, step) {
-        _safeSpeak(step.instruction);
-      },
-      onStepChanged: (index, step) {
-        setState(() {
-          _currentInstruction = step.instruction;
-          _currentSpeedLimit = step.speedLimitKmh;
-          final route = _activeRoute;
-          if (route != null) {
-            final remaining = route.steps.length - index;
-            final count = remaining.clamp(0, 3).toInt();
-            _upcomingSteps = route.steps.sublist(index, index + count);
-          }
-        });
-        FlutterBackgroundService().invoke('updateInstruction', {
-          'instruction': step.instruction,
-          'distance': _remainingDistanceText,
-        });
-      },
-      onReroute: (msg) {
-        setState(() => _currentInstruction = msg);
-        _safeSpeak('Rerouting, please wait');
-      },
-      onRouteChanged: (newRoute, rerouteOrigin) async {
-        final drawing = MapboxDrawingService(mapboxMap: map);
-        await drawing.drawRoute(newRoute);
-        await _keepCarLayerAboveRoute();
-        _buildDisplayRouteMetrics(newRoute);
-        final reseedPosition = mapbox.Position(
-          rerouteOrigin.longitude,
-          rerouteOrigin.latitude,
-        );
-        if (!mounted) return;
-        setState(() {
-          _activeRoute = newRoute;
-          _remainingDistanceText = newRoute.distanceText;
-          _estimatedArrival = DateTime.now().add(
-            Duration(seconds: newRoute.durationSeconds.toInt()),
-          );
-        });
-        _reseedDisplayedCarForRoute(newRoute, fromPosition: reseedPosition);
-      },
-      onRouteProgress: (
-        progressRoute,
-        closestRouteIndex,
-        remainingDistanceMeters,
-        remainingDurationSeconds,
-      ) async {
-        if (!mounted) return;
-        setState(() {
-          _remainingDistanceText = _formatDistance(remainingDistanceMeters);
-          _estimatedArrival = DateTime.now().add(
-            Duration(seconds: remainingDurationSeconds.toInt()),
-          );
-        });
-      },
-      onDestinationReached: () async {
-        _safeSpeak('You have reached your destination!');
-        _recenterTimer?.cancel();
-        _recenterTimer = null;
-        await _clearAll();
-        await _setupLocationPuck();
-        _resetCameraToCurrentLocation();
-        if (mounted) {
-          setState(() {
-            _isNavigating = false;
-            _isFollowingCamera = true;
-            _currentSpeedLimit = null;
-            _upcomingSteps = [];
-            _isNavCardExpanded = false;
-            _showingRouteOverview = false;
-            _ttsEnabled = true;
-          });
-        }
-      },
-    );
-
     _navService!.setFollowModeEnabled(true);
-    if (_activeRoute != null && _activeRoute!.steps.isNotEmpty) {
-      _upcomingSteps = _activeRoute!.steps.take(3).toList();
-    }
     final navigationRoute = route;
-    _navService!.startNavigation(
-      route: navigationRoute,
-      destination: destination,
-    );
+    if (!navigation.isCurrent(committed)) return;
+    if (navigation.state.status != NavigationStatus.navigating) {
+      navigation.startNavigation(
+        route: navigationRoute,
+        destination: NavigationCoordinate(
+          destination.lng.toDouble(),
+          destination.lat.toDouble(),
+        ),
+      );
+    }
 
     setState(() {
-      _isNavigating = true;
       _isFollowingCamera = true;
       _showingRouteOverview = false;
-      _currentSpeedLimit =
-          navigationRoute.steps.isNotEmpty
-              ? navigationRoute.steps.first.speedLimitKmh
-              : null;
-      _upcomingSteps = navigationRoute.steps.take(3).toList();
-      _currentInstruction =
-          navigationRoute.steps.isNotEmpty
-              ? navigationRoute.steps.first.instruction
-              : 'Continue';
-      _remainingDistanceText = navigationRoute.distanceText;
     });
   }
 
@@ -872,10 +1048,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _resetCameraToCurrentLocation();
     _clearAll();
     setState(() {
-      _isNavigating = false;
       _isFollowingCamera = true;
-      _currentSpeedLimit = null;
-      _upcomingSteps = [];
       _isNavCardExpanded = false;
       _showingRouteOverview = false;
       _ttsEnabled = true;
@@ -898,6 +1071,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   }
 
   Future<mapbox.Position?> _currentNavigationPosition() async {
+    final raw = _navService?.state.rawLocation;
+    if (raw != null) return mapbox.Position(raw.longitude, raw.latitude);
     try {
       final position = await geolocator.Geolocator.getCurrentPosition(
         locationSettings: const geolocator.LocationSettings(
@@ -906,7 +1081,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         ),
       );
       final current = mapbox.Position(position.longitude, position.latitude);
-      _currentPosition = current;
       return current;
     } catch (_) {
       return _currentPosition;
@@ -1271,7 +1445,18 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     var desiredPosition = target;
     var desiredRouteDistance = _carTargetRouteDistance;
 
-    if (speedMps > 0) {
+    // Prediction horizon: stop speed-extrapolation once GPS is older than the
+    // service's predictionHorizon. Vehicle stays frozen until fresh GPS arrives.
+    // Zero-speed fixes (speedMps == 0) never extrapolate, so the if-block is
+    // skipped regardless, and a fresh fix always corrects the display position.
+    final lastUpdateAt = _lastLocationUpdateAt;
+    final predictionHorizon =
+        _navService?.predictionHorizon ?? const Duration(seconds: 5);
+    final predictionExpired =
+        lastUpdateAt != null &&
+        DateTime.now().difference(lastUpdateAt) > predictionHorizon;
+
+    if (speedMps > 0 && !predictionExpired) {
       if (desiredRouteDistance != null) {
         desiredRouteDistance =
             (desiredRouteDistance + speedMps * dtSeconds)
@@ -1324,7 +1509,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
 
     unawaited(_paintDisplayedCarPose(nextPosition, nextBearing));
     unawaited(_followDisplayedCarCamera(nextPosition, nextBearing));
-    unawaited(_paintDisplayedRouteProgress());
+
 
     // The loop keeps ticking while navigation is active, even between GPS fixes.
   }
@@ -1347,8 +1532,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     _carModelRebuildInFlight = false;
     _lastCameraFollowAt = null;
     _cameraFollowInFlight = false;
-    _lastRouteProgressPaintAt = null;
-    _routeProgressPaintInFlight = false;
     _suppressFollowCamera = false;
   }
 
@@ -1654,29 +1837,6 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     return mapbox.Position(last[0], last[1]);
   }
 
-  Future<void> _paintDisplayedRouteProgress() async {
-    final route = _activeRoute;
-    final map = _mapboxMap;
-    final distance = _displayCarRouteDistance;
-    if (route == null || map == null || distance == null) return;
-    if (_routeProgressPaintInFlight) return;
-
-    final now = DateTime.now();
-    final lastPaintAt = _lastRouteProgressPaintAt;
-    if (lastPaintAt != null &&
-        now.difference(lastPaintAt).inMilliseconds < 120) {
-      return;
-    }
-
-    _lastRouteProgressPaintAt = now;
-    _routeProgressPaintInFlight = true;
-    try {
-      final drawing = MapboxDrawingService(mapboxMap: map);
-      await drawing.updateRouteProgressByDistance(route, distance);
-    } finally {
-      _routeProgressPaintInFlight = false;
-    }
-  }
 
   double? _nextDisplayedRouteDistance({
     required double? currentDistance,
@@ -1768,7 +1928,7 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
     });
   }
 
-  void _startLocationUpdates() async {
+  Future<void> _startLocationUpdates() async {
     final serviceEnabled =
         await geolocator.Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) return;
@@ -1781,30 +1941,8 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
         permission == geolocator.LocationPermission.deniedForever) {
       return;
     }
-
-    final last = await geolocator.Geolocator.getLastKnownPosition();
-    if (last != null) {
-      _currentPosition = mapbox.Position(last.longitude, last.latitude);
-      await _mapboxMap?.flyTo(
-        mapbox.CameraOptions(
-          center: mapbox.Point(
-            coordinates: mapbox.Position(last.longitude, last.latitude),
-          ),
-          zoom: 17.0,
-          pitch: 60.0,
-        ),
-        mapbox.MapAnimationOptions(duration: 1500),
-      );
-    }
-
-    geolocator.Geolocator.getPositionStream(
-      locationSettings: const geolocator.LocationSettings(
-        accuracy: geolocator.LocationAccuracy.bestForNavigation,
-        distanceFilter: 1,
-      ),
-    ).listen((position) {
-      _currentPosition = mapbox.Position(position.longitude, position.latitude);
-    });
+    if (!mounted) return;
+    _navService?.attachLocationSource();
   }
 
   Future<void> _addDestinationMarker(mapbox.Position position) async {
