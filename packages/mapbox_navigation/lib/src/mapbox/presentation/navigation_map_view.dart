@@ -10,21 +10,75 @@ import 'package:mapbox_navigation/src/mapbox/models/vehicle_appearance.dart';
 import 'package:mapbox_navigation/src/mapbox/rendering/mapbox_route_render_coordinator.dart';
 import 'package:mapbox_navigation/src/mapbox/rendering/mapbox_route_renderer.dart';
 import 'package:mapbox_navigation/src/mapbox/rendering/mapbox_vehicle_renderer.dart';
+import 'package:mapbox_navigation/src/models/geo_point.dart';
 import 'package:mapbox_navigation/src/models/navigation_enums.dart';
 import 'package:mapbox_navigation/src/models/navigation_route.dart';
 import 'package:mapbox_navigation/src/models/navigation_state.dart';
 
 /// Reusable Flutter widget providing Mapbox navigation map rendering, active route
 /// visualization, 3D GLB vehicle animation, and camera tracking.
+///
+/// ### Controller Ownership
+/// The caller owns the [NavigationController]. Disposing [NavigationMapView] detaches
+/// the presentation layers, cancels map rendering timers, and unsubscribes from the
+/// controller without disposing it. The controller survives across screen transitions,
+/// route changes, or view re-mounts.
+///
+/// ### Application Lifecycle
+/// Implements [WidgetsBindingObserver] to pause the 60fps vehicle animation timer
+/// during background/inactive states ([AppLifecycleState.paused], [AppLifecycleState.inactive]),
+/// eliminating background CPU and battery drain. Upon resume ([AppLifecycleState.resumed]),
+/// it immediately calls [NavigationController.evaluateFreshness] to detect GPS fix staleness
+/// without timer backlog or visual jumps.
+///
+/// ### Foreground-Only Navigation
+/// This widget and package provide foreground navigation only. Background navigation is
+/// not supported in V1.
 class NavigationMapView extends StatefulWidget {
+  /// The navigation controller governing active routing, route matching, and tracking state.
+  ///
+  /// **Caller-Owned**: This controller is owned by the caller. Disposing this widget
+  /// will NOT dispose the controller.
   final NavigationController controller;
+
+  /// Optional Mapbox public access token. If omitted or null, the default token
+  /// configured via [mapbox.MapboxOptions.setAccessToken] will be used.
   final String? accessToken;
+
+  /// Visual appearance and rendering configuration for the vehicle indicator
+  /// (either a 2D puck or a 3D GLB model).
   final VehicleAppearance vehicle;
+
+  /// Visual styling configuration for the active route line (colors, casing, widths).
   final MapboxRouteTheme routeTheme;
+
+  /// Mapbox style URI to load (defaults to [mapbox.MapboxStyles.STANDARD]).
   final String styleUri;
+
+  /// Optional camera controller. If not provided, an internal camera controller
+  /// is created and managed automatically.
   final NavigationCameraController? cameraController;
+
+  /// Initial map center coordinate before first location fix arrives.
+  final GeoPoint? initialCenter;
+
+  /// Initial camera zoom level (typically between 12.0 and 19.5).
+  final double initialZoom;
+
+  /// Initial camera pitch angle in degrees (typically 0.0 for top-down, up to 80.0 for 3D navigation).
+  final double initialPitch;
+
+  /// Callback invoked when the underlying Mapbox map instance is created.
+  ///
+  /// **Advanced Escape Hatch**: Exposes the raw [mapbox.MapboxMap] instance for custom
+  /// gesture listeners, annotation managers, or layer additions. Direct manipulation of
+  /// layers or camera managed by [NavigationMapView] may interfere with navigation rendering.
   final void Function(mapbox.MapboxMap map)? onMapCreated;
+
+  /// Callback invoked when the user taps on the map canvas.
   final void Function(mapbox.Position tappedPoint)? onMapTap;
+
+  /// Callback invoked when the map style has finished loading.
   final void Function(mapbox.StyleLoadedEventData event)? onStyleLoaded;
 
   const NavigationMapView({
@@ -35,6 +89,9 @@ class NavigationMapView extends StatefulWidget {
     this.routeTheme = const MapboxRouteTheme(),
     this.styleUri = mapbox.MapboxStyles.STANDARD,
     this.cameraController,
+    this.initialCenter,
+    this.initialZoom = 17.0,
+    this.initialPitch = 60.0,
     this.onMapCreated,
     this.onMapTap,
     this.onStyleLoaded,
@@ -76,7 +133,8 @@ class _MapboxRouteDrawingDelegate implements RouteRenderDelegate {
   }
 }
 
-class _NavigationMapViewState extends State<NavigationMapView> {
+class _NavigationMapViewState extends State<NavigationMapView>
+    with WidgetsBindingObserver {
   mapbox.MapboxMap? _mapboxMap;
   late final NavigationCameraController _cameraController;
   bool _ownsCameraController = false;
@@ -94,6 +152,8 @@ class _NavigationMapViewState extends State<NavigationMapView> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+
     if (widget.accessToken != null && widget.accessToken!.isNotEmpty) {
       mapbox.MapboxOptions.setAccessToken(widget.accessToken!);
     }
@@ -111,6 +171,21 @@ class _NavigationMapViewState extends State<NavigationMapView> {
 
     _stateSubscription =
         widget.controller.states.listen(_onNavigationStateChanged);
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    switch (state) {
+      case AppLifecycleState.paused:
+      case AppLifecycleState.inactive:
+      case AppLifecycleState.hidden:
+        _animator?.pause();
+      case AppLifecycleState.resumed:
+        widget.controller.evaluateFreshness();
+        _animator?.resume(widget.controller.state);
+      case AppLifecycleState.detached:
+        _animator?.pause();
+    }
   }
 
   @override
@@ -180,6 +255,7 @@ class _NavigationMapViewState extends State<NavigationMapView> {
   }
 
   void _onMapCreated(mapbox.MapboxMap controller) async {
+    if (!mounted) return;
     _mapboxMap = controller;
     _cameraController.attachMap(controller);
 
@@ -204,7 +280,7 @@ class _NavigationMapViewState extends State<NavigationMapView> {
     // Initial camera placement
     final initialPos = widget.controller.state.rawFix?.coordinate ??
         widget.controller.state.matchedPoint;
-    if (initialPos != null) {
+    if (initialPos != null && mounted) {
       await controller.setCamera(
         mapbox.CameraOptions(
           center: mapbox.Point(
@@ -216,6 +292,8 @@ class _NavigationMapViewState extends State<NavigationMapView> {
         ),
       );
     }
+
+    if (!mounted || _mapboxMap == null) return;
 
     // Map tap interaction
     controller.addInteraction(
@@ -229,10 +307,12 @@ class _NavigationMapViewState extends State<NavigationMapView> {
   }
 
   void _onStyleLoaded(mapbox.StyleLoadedEventData event) async {
-    if (_mapboxMap == null) return;
+    if (!mounted || _mapboxMap == null) return;
     widget.onStyleLoaded?.call(event);
 
     await _routeCoordinator?.onStyleReloaded(widget.controller.state);
+    if (!mounted || _mapboxMap == null) return;
+
     final currentPose = _animator?.currentPose;
     if (currentPose != null &&
         widget.controller.state.status == NavigationStatus.navigating) {
@@ -252,15 +332,17 @@ class _NavigationMapViewState extends State<NavigationMapView> {
     final rawLoc = widget.controller.state.rawFix?.coordinate;
     final centerCoord = rawLoc != null
         ? mapbox.Position(rawLoc.longitude, rawLoc.latitude)
-        : mapbox.Position(73.0551, 33.7215);
+        : (widget.initialCenter != null
+            ? mapbox.Position(widget.initialCenter!.longitude, widget.initialCenter!.latitude)
+            : mapbox.Position(0.0, 0.0));
 
     // ignore: deprecated_member_use
     return mapbox.MapWidget(
       // ignore: deprecated_member_use
       cameraOptions: mapbox.CameraOptions(
         center: mapbox.Point(coordinates: centerCoord),
-        zoom: 17.0,
-        pitch: 60.0,
+        zoom: widget.initialZoom,
+        pitch: widget.initialPitch,
       ),
       styleUri: widget.styleUri,
       onMapCreated: _onMapCreated,
@@ -275,9 +357,14 @@ class _NavigationMapViewState extends State<NavigationMapView> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _mapboxMap = null;
     _stateSubscription?.cancel();
+    _stateSubscription = null;
     _animator?.dispose();
+    _animator = null;
     _routeCoordinator?.dispose();
+    _routeCoordinator = null;
     _cameraController.detachMap();
     if (_ownsCameraController) {
       _cameraController.dispose();

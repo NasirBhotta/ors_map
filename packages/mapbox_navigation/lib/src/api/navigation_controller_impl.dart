@@ -144,17 +144,17 @@ class NavigationControllerImpl implements NavigationController {
         _onLocationFix(fix);
       },
       onError: (Object error, StackTrace stack) {
-        if (!_disposed) {
-          _eventController.add(
-            NavigationErrorEvent(
-              error: LocationUnavailableException(
-                'Location stream error: $error',
-                reason: LocationErrorReason.invalidData,
-                cause: error,
-              ),
-            ),
+        final NavigationException navError;
+        if (error is LocationUnavailableException) {
+          navError = error;
+        } else {
+          navError = LocationUnavailableException(
+            'Location stream error: $error',
+            reason: LocationErrorReason.invalidData,
+            cause: error,
           );
         }
+        _emitEvent(NavigationErrorEvent(error: navError));
       },
       onDone: () {
         if (!_disposed && generation == _locationGeneration) {
@@ -162,6 +162,11 @@ class NavigationControllerImpl implements NavigationController {
         }
       },
     );
+  }
+
+  void _emitEvent(NavigationEvent event) {
+    if (_disposed || _eventController.isClosed) return;
+    _eventController.add(event);
   }
 
   @override
@@ -235,6 +240,16 @@ class NavigationControllerImpl implements NavigationController {
     attachLocationSource();
     _freshnessMonitor.start(() => _lastUsableFixTimestamp);
     _publishState();
+
+    if (route.steps.isNotEmpty) {
+      _emitEvent(
+        InstructionChangedEvent(
+          stepIndex: 0,
+          step: route.steps.first,
+        ),
+      );
+      _lastAnnouncedStepIndex = 0;
+    }
   }
 
   void _beginSession({required GeoPoint destination}) {
@@ -247,6 +262,9 @@ class NavigationControllerImpl implements NavigationController {
   @override
   void stopNavigation() {
     if (_disposed) return;
+    if (_status == NavigationStatus.stopped && _activeRoute == null) {
+      return;
+    }
 
     _freshnessMonitor.stop();
     _sessionId++;
@@ -275,6 +293,12 @@ class NavigationControllerImpl implements NavigationController {
     _locationFreshness = LocationFreshness.unknown;
 
     _publishState();
+  }
+
+  @override
+  void evaluateFreshness() {
+    if (_disposed || _status != NavigationStatus.navigating) return;
+    _freshnessMonitor.checkNow(() => _lastUsableFixTimestamp);
   }
 
   void _setRoute(NavigationRoute route) {
@@ -468,7 +492,7 @@ class NavigationControllerImpl implements NavigationController {
 
       // Emit discrete events
       if (stepIndex != previousStepIndex && stepIndex < route.steps.length) {
-        _eventController.add(
+        _emitEvent(
           InstructionChangedEvent(
             stepIndex: stepIndex,
             step: route.steps[stepIndex],
@@ -477,7 +501,7 @@ class NavigationControllerImpl implements NavigationController {
       }
 
       if (arrived && _destination != null) {
-        _eventController.add(
+        _emitEvent(
           DestinationReachedEvent(destination: _destination!),
         );
       }
@@ -486,7 +510,7 @@ class NavigationControllerImpl implements NavigationController {
         unawaited(_reroute(fix));
       }
     } catch (e) {
-      _eventController.add(
+      _emitEvent(
         NavigationErrorEvent(
           error: LocationUnavailableException(
             'Error processing location fix: $e',
@@ -512,7 +536,7 @@ class NavigationControllerImpl implements NavigationController {
     _publishState();
 
     final ownership = _captureOwnership();
-    _eventController.add(RerouteStartedEvent(triggerFix: fix));
+    _emitEvent(RerouteStartedEvent(triggerFix: fix));
 
     try {
       final newRoute = await routeProvider
@@ -526,11 +550,21 @@ class NavigationControllerImpl implements NavigationController {
 
       _setRoute(newRoute);
       _publishState();
+
+      if (newRoute.steps.isNotEmpty) {
+        _emitEvent(
+          InstructionChangedEvent(
+            stepIndex: 0,
+            step: newRoute.steps.first,
+          ),
+        );
+        _lastAnnouncedStepIndex = 0;
+      }
     } catch (e) {
       if (_ownsRequest(ownership) && !_disposed) {
         _requestStatus = RouteRequestStatus.failed;
         _publishState();
-        _eventController.add(
+        _emitEvent(
           RerouteFailedEvent(reason: 'Reroute calculation failed: $e'),
         );
       }
@@ -551,16 +585,19 @@ class NavigationControllerImpl implements NavigationController {
       fix.accuracyMeters.isFinite &&
       fix.accuracyMeters >= 0.0 &&
       fix.bearingDegrees.isFinite &&
-      fix.speedMetersPerSecond.isFinite;
+      fix.speedMetersPerSecond.isFinite &&
+      fix.speedMetersPerSecond >= 0.0 &&
+      !fix.timestamp.isAfter(clock().add(const Duration(minutes: 2)));
 
   void _publishState() {
+    if (_disposed || _stateController.isClosed) return;
     final fix = _lastFix;
     final steps = _activeRoute?.steps;
     final stepIndex = steps != null && _currentStepIndex < steps.length
         ? _currentStepIndex
         : null;
 
-    _state = NavigationState(
+    final newState = NavigationState(
       status: _status,
       routeRequestStatus: _requestStatus,
       trackingStatus: _trackingStatus,
@@ -583,6 +620,8 @@ class NavigationControllerImpl implements NavigationController {
       isArrived: _status == NavigationStatus.arrived,
     );
 
+    if (_state == newState) return;
+    _state = newState;
     _stateController.add(_state);
   }
 
@@ -592,12 +631,12 @@ class NavigationControllerImpl implements NavigationController {
 
     _freshnessMonitor.dispose();
     stopNavigation();
+    _status = NavigationStatus.disposed;
+    _publishState();
     _disposed = true;
     _locationGeneration++;
     _locationSub?.cancel();
     _locationSub = null;
-    _status = NavigationStatus.disposed;
-    _publishState();
 
     unawaited(_stateController.close());
     unawaited(_eventController.close());

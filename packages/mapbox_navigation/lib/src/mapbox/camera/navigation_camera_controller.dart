@@ -4,18 +4,28 @@ import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
 import 'package:mapbox_navigation/src/models/geo_point.dart';
+import 'package:meta/meta.dart';
 
 /// Coordinates Mapbox camera movements during navigation: follow-mode,
 /// bearing tracking, recenter timers, gestures, and route overview.
+///
+/// **Experimental**: This controller directly references [mapbox.MbxEdgeInsets]
+/// and Mapbox camera animation durations. Its public surface may evolve in future pre-releases.
+@experimental
 class NavigationCameraController {
   mapbox.MapboxMap? _mapboxMap;
   final ValueNotifier<bool> isFollowingNotifier = ValueNotifier<bool>(true);
   final ValueNotifier<bool> isOverviewNotifier = ValueNotifier<bool>(false);
 
+  /// Camera viewport edge insets used for follow, recenter, and exit-overview animations.
+  mapbox.MbxEdgeInsets cameraPadding;
+
   bool _suppressFollow = false;
   bool _cameraFollowInFlight = false;
   DateTime? _lastFollowAt;
   Timer? _recenterTimer;
+  GeoPoint? _lastFollowPosition;
+  double? _lastFollowBearing;
 
   static const double navigationZoom = 19.3;
   static const double navigationPitch = 80.0;
@@ -23,6 +33,16 @@ class NavigationCameraController {
   static const int recenterAnimationDurationMs = 1500;
   static const int overviewAnimationDurationMs = 2200;
   static const int overviewReturnAnimationDurationMs = 1700;
+
+  NavigationCameraController({
+    mapbox.MbxEdgeInsets? cameraPadding,
+  }) : cameraPadding = cameraPadding ??
+            mapbox.MbxEdgeInsets(
+              top: 80,
+              left: 0,
+              bottom: 340,
+              right: 0,
+            );
 
   bool get isFollowing => isFollowingNotifier.value;
   bool get isOverview => isOverviewNotifier.value;
@@ -35,6 +55,8 @@ class NavigationCameraController {
     _mapboxMap = null;
     _recenterTimer?.cancel();
     _recenterTimer = null;
+    _lastFollowPosition = null;
+    _lastFollowBearing = null;
   }
 
   /// Follows the vehicle smoothly if follow mode is active.
@@ -57,6 +79,19 @@ class NavigationCameraController {
       return;
     }
 
+    final lastPos = _lastFollowPosition;
+    final lastBrg = _lastFollowBearing;
+    if (lastPos != null && lastBrg != null) {
+      final dLat = (position.latitude - lastPos.latitude).abs();
+      final dLng = (position.longitude - lastPos.longitude).abs();
+      final dBrg = ((bearing - lastBrg).abs() % 360.0);
+      final shortestBrg = dBrg > 180.0 ? 360.0 - dBrg : dBrg;
+      // Skip redundant camera animations if vehicle has not moved noticeably (< 0.1m, < 0.5 deg)
+      if (dLat < 0.000001 && dLng < 0.000001 && shortestBrg < 0.5) {
+        return;
+      }
+    }
+
     _lastFollowAt = now;
     _cameraFollowInFlight = true;
     try {
@@ -68,15 +103,12 @@ class NavigationCameraController {
           zoom: navigationZoom,
           pitch: navigationPitch,
           bearing: bearing,
-          padding: mapbox.MbxEdgeInsets(
-            top: 80,
-            left: 0,
-            bottom: 340,
-            right: 0,
-          ),
+          padding: cameraPadding,
         ),
         mapbox.MapAnimationOptions(duration: followAnimationDurationMs),
       );
+      _lastFollowPosition = position;
+      _lastFollowBearing = bearing;
     } finally {
       _cameraFollowInFlight = false;
     }
@@ -119,12 +151,7 @@ class NavigationCameraController {
             zoom: navigationZoom,
             pitch: navigationPitch,
             bearing: currentBearing ?? 0.0,
-            padding: mapbox.MbxEdgeInsets(
-              top: 80,
-              left: 0,
-              bottom: 340,
-              right: 0,
-            ),
+            padding: cameraPadding,
           ),
           mapbox.MapAnimationOptions(duration: recenterAnimationDurationMs),
         );
@@ -135,6 +162,8 @@ class NavigationCameraController {
     } finally {
       _suppressFollow = false;
       _lastFollowAt = null;
+      _lastFollowPosition = null;
+      _lastFollowBearing = null;
     }
   }
 
@@ -146,6 +175,8 @@ class NavigationCameraController {
     _recenterTimer?.cancel();
     _recenterTimer = null;
     _suppressFollow = true;
+    _lastFollowPosition = null;
+    _lastFollowBearing = null;
 
     try {
       await map.easeTo(
@@ -215,12 +246,7 @@ class NavigationCameraController {
           zoom: navigationZoom,
           pitch: navigationPitch,
           bearing: currentBearing,
-          padding: mapbox.MbxEdgeInsets(
-            top: 80,
-            left: 0,
-            bottom: 340,
-            right: 0,
-          ),
+          padding: cameraPadding,
         ),
         mapbox.MapAnimationOptions(duration: overviewReturnAnimationDurationMs),
       );

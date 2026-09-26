@@ -126,6 +126,12 @@ final class NavigationConfig {
 
   /// Validates configuration parameters and throws [InvalidConfigurationException] if invalid.
   void validate() {
+    if (tracking.offRouteMeters <= 0.0 || !tracking.offRouteMeters.isFinite) {
+      throw const InvalidConfigurationException('offRouteMeters must be positive');
+    }
+    if (arrival.destinationRadiusMeters <= 0.0 || !arrival.destinationRadiusMeters.isFinite) {
+      throw const InvalidConfigurationException('destinationRadiusMeters must be positive');
+    }
     if (freshness.staleTimeout.inMicroseconds <= 0) {
       throw const InvalidConfigurationException('staleTimeout must be positive');
     }

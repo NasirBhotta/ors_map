@@ -48,6 +48,22 @@ class FreshnessMonitor {
     });
   }
 
+  /// Immediately evaluates freshness against current wall clock time without waiting for the timer.
+  void checkNow(DateTime? Function() getLastUsableFixTimestamp) {
+    final now = clock();
+    final lastFixTime = getLastUsableFixTimestamp();
+    final updated = computeFreshness(
+      now: now,
+      lastUsableFixTimestamp: lastFixTime,
+      staleTimeout: staleTimeout,
+    );
+
+    if (updated != _currentFreshness) {
+      _currentFreshness = updated;
+      onFreshnessChanged(updated);
+    }
+  }
+
   /// Directly updates the monitor's freshness status on incoming fixes.
   void updateOnFix(LocationFreshness newFreshness) {
     _currentFreshness = newFreshness;

@@ -58,15 +58,41 @@ final class RouteMetrics {
     );
   }
 
+  /// Fast binary search finding the first index whose vertex distance is >= [targetMeters].
+  ///
+  /// Matches the exact semantics of `for (var i = 0; i < distances.length; i++) if (distances[i] >= targetMeters) return i;`
+  /// but operates in O(log N) time instead of O(N).
   static int _indexForDistance(List<double> distances, double targetMeters) {
     if (distances.isEmpty) return 0;
-    for (var i = 0; i < distances.length; i++) {
-      if (distances[i] >= targetMeters) return i;
+    if (targetMeters <= distances.first) return 0;
+    if (targetMeters > distances.last) return distances.length - 1;
+
+    var low = 0;
+    var high = distances.length - 1;
+    var result = distances.length - 1;
+
+    while (low <= high) {
+      final mid = (low + high) >> 1;
+      if (distances[mid] >= targetMeters) {
+        result = mid;
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
     }
-    return distances.length - 1;
+
+    return result;
   }
 
-  /// Interpolates the exact [GeoPoint] along the route at [distanceMeters].
+  /// Finds the segment index [i] such that vertexDistances[i] <= distanceMeters <= vertexDistances[i+1].
+  int segmentIndexForDistance(double distanceMeters) {
+    if (vertexDistances.length <= 1) return 0;
+    final clamped = distanceMeters.clamp(0.0, totalLengthMeters);
+    final nextIdx = _indexForDistance(vertexDistances, clamped);
+    return (nextIdx == 0 ? 0 : nextIdx - 1).clamp(0, vertexDistances.length - 2);
+  }
+
+  /// Interpolates the exact [GeoPoint] along the route at [distanceMeters] using O(log N) binary search.
   GeoPoint? coordinateAtDistance(double distanceMeters) {
     final coords = route.geometry;
     if (coords.isEmpty || vertexDistances.length != coords.length) {
@@ -74,23 +100,24 @@ final class RouteMetrics {
     }
 
     final clampedDistance = distanceMeters.clamp(0.0, totalLengthMeters);
-    for (var i = 0; i < vertexDistances.length - 1; i++) {
-      final startDist = vertexDistances[i];
-      final endDist = vertexDistances[i + 1];
-      if (clampedDistance > endDist) continue;
+    final i = segmentIndexForDistance(clampedDistance);
 
-      final segLength = max(endDist - startDist, 0.0);
-      final fraction =
-          segLength == 0.0 ? 0.0 : (clampedDistance - startDist) / segLength;
-      final a = coords[i];
-      final b = coords[i + 1];
-
-      final lng = a.longitude + (b.longitude - a.longitude) * fraction;
-      final lat = a.latitude + (b.latitude - a.latitude) * fraction;
-      return GeoPoint(latitude: lat, longitude: lng);
+    if (i >= vertexDistances.length - 1) {
+      return coords.last;
     }
 
-    return coords.last;
+    final startDist = vertexDistances[i];
+    final endDist = vertexDistances[i + 1];
+    final segLength = max(endDist - startDist, 0.0);
+    final fraction =
+        segLength == 0.0 ? 0.0 : ((clampedDistance - startDist) / segLength).clamp(0.0, 1.0);
+
+    final a = coords[i];
+    final b = coords[i + 1];
+
+    final lng = a.longitude + (b.longitude - a.longitude) * fraction;
+    final lat = a.latitude + (b.latitude - a.latitude) * fraction;
+    return GeoPoint(latitude: lat, longitude: lng);
   }
 
   /// Calculates the tangent bearing along the route at [distanceMeters].
@@ -148,7 +175,7 @@ final class RouteMetrics {
     final dLon = (lon2 - lon1) * pi / 180.0;
     final a = pow(sin(dLat / 2.0), 2) +
         cos(lat1 * pi / 180.0) * cos(lat2 * pi / 180.0) * pow(sin(dLon / 2.0), 2);
-    return 2.0 * r * asin(sqrt(a.toDouble()));
+    return 2.0 * r * asin(sqrt(a.toDouble().clamp(0.0, 1.0)));
   }
 
   /// Computes initial bearing from (lat1, lon1) to (lat2, lon2) in degrees [0, 360).
@@ -163,11 +190,11 @@ final class RouteMetrics {
     final dLon = (lon2 - lon1) * pi / 180.0;
     final y = sin(dLon) * cos(lat2Rad);
     final x = cos(lat1Rad) * sin(lat2Rad) - sin(lat1Rad) * cos(lat2Rad) * cos(dLon);
-    return (atan2(y, x) * 180.0 / pi + 360.0) % 360.0;
+    return ((atan2(y, x) * 180.0 / pi % 360.0) + 360.0) % 360.0;
   }
 
   /// Normalizes any bearing to the range [0.0, 360.0).
-  static double normalizeBearing(double bearing) => (bearing + 360.0) % 360.0;
+  static double normalizeBearing(double bearing) => ((bearing % 360.0) + 360.0) % 360.0;
 
   /// Calculates the shortest angular difference from [from] to [to] in degrees [-180, 180].
   static double shortestBearingDelta(double from, double to) {

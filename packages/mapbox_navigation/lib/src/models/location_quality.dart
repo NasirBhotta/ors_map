@@ -19,6 +19,12 @@ final class LocationQuality {
     this.freshness = LocationFreshness.unknown,
   });
 
+  /// Whether the location fix is currently fresh.
+  bool get isFresh => freshness == LocationFreshness.fresh;
+
+  /// Whether the location fix has become stale.
+  bool get isStale => freshness == LocationFreshness.stale;
+
   /// Elapsed age of the last usable fix relative to [now].
   ///
   /// Returns null if no fix has been received. Returns [Duration.zero] if

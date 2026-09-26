@@ -32,6 +32,8 @@ final class NavigationState {
 
   /// The authoritative projection of the current location onto the route geometry.
   ///
+  /// Represents measured, snapped route progress metrics derived directly from GPS fixes.
+  /// Does NOT represent smoothed, interpolated visual animation poses.
   /// Null if position has not yet been matched or is off-route.
   final GeoPoint? matchedPoint;
 

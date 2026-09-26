@@ -1,5 +1,3 @@
-import 'dart:convert';
-
 import 'package:flutter/foundation.dart';
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
 import 'package:mapbox_navigation/src/mapbox/models/vehicle_appearance.dart';
@@ -10,8 +8,11 @@ final class MapboxVehicleRenderer {
   final mapbox.MapboxMap mapboxMap;
   final VehicleAppearance appearance;
 
-  static const String carModelSourceId = 'navigation-car-model-source';
-  static const String carModelLayerId = 'navigation-car-model-layer';
+  static const String carModelSourceId = 'mapbox-nav-car-model-source';
+  static const String carModelLayerId = 'mapbox-nav-car-model-layer';
+
+  GeoPoint? _lastRenderedPosition;
+  double? _lastRenderedBearing;
 
   MapboxVehicleRenderer({
     required this.mapboxMap,
@@ -23,6 +24,8 @@ final class MapboxVehicleRenderer {
     required GeoPoint position,
     required double bearing,
   }) async {
+    _lastRenderedPosition = null;
+    _lastRenderedBearing = null;
     if (!appearance.enabled) return;
 
     // Turn off 2D location component when 3D model is active
@@ -76,6 +79,9 @@ final class MapboxVehicleRenderer {
       [0.0, 0.0, _carModelRotation(bearing)],
     );
 
+    _lastRenderedPosition = position;
+    _lastRenderedBearing = bearing;
+
     await keepVehicleAboveRoute();
   }
 
@@ -85,6 +91,20 @@ final class MapboxVehicleRenderer {
     required double bearing,
   }) async {
     if (!appearance.enabled) return;
+
+    final lastPos = _lastRenderedPosition;
+    final lastBrg = _lastRenderedBearing;
+    if (lastPos != null && lastBrg != null) {
+      final dLat = (position.latitude - lastPos.latitude).abs();
+      final dLng = (position.longitude - lastPos.longitude).abs();
+      final dBrg = ((bearing - lastBrg).abs() % 360.0);
+      final shortestBrg = dBrg > 180.0 ? 360.0 - dBrg : dBrg;
+
+      // Skip native calls if vehicle is stationary (< 0.05m and < 0.2 deg)
+      if (dLat < 0.0000005 && dLng < 0.0000005 && shortestBrg < 0.2) {
+        return;
+      }
+    }
 
     try {
       final source =
@@ -102,6 +122,8 @@ final class MapboxVehicleRenderer {
           [0.0, 0.0, _carModelRotation(bearing)],
         ),
       ]);
+      _lastRenderedPosition = position;
+      _lastRenderedBearing = bearing;
     } catch (e) {
       debugPrint('Vehicle pose update failed, attempting recovery: $e');
       try {
@@ -111,7 +133,9 @@ final class MapboxVehicleRenderer {
   }
 
   /// Moves the vehicle layer above the route line layer to prevent clipping.
-  Future<void> keepVehicleAboveRoute({String targetLayerId = 'route-layer'}) async {
+  Future<void> keepVehicleAboveRoute({
+    String targetLayerId = 'mapbox-nav-route-layer',
+  }) async {
     try {
       await mapboxMap.style.moveStyleLayer(
         carModelLayerId,
@@ -122,6 +146,8 @@ final class MapboxVehicleRenderer {
 
   /// Removes vehicle layer and source from style.
   Future<void> removeVehicle() async {
+    _lastRenderedPosition = null;
+    _lastRenderedBearing = null;
     try {
       await mapboxMap.style.removeStyleLayer(carModelLayerId);
     } catch (_) {}
@@ -175,15 +201,6 @@ final class MapboxVehicleRenderer {
   }
 
   String _carPointGeoJson(GeoPoint point, double bearing) {
-    return jsonEncode({
-      'type': 'Feature',
-      'geometry': {
-        'type': 'Point',
-        'coordinates': [point.longitude, point.latitude],
-      },
-      'properties': {
-        'bearing': bearing,
-      },
-    });
+    return '{"type":"Feature","geometry":{"type":"Point","coordinates":[${point.longitude},${point.latitude}]},"properties":{"bearing":$bearing}}';
   }
 }

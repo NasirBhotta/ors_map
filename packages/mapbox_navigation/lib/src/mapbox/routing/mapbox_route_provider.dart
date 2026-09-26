@@ -95,6 +95,11 @@ final class MapboxRouteProvider implements RouteProvider {
       );
     }
 
+    return parseRouteResponse(data);
+  }
+
+  /// Parses a Mapbox Directions V5 API JSON dictionary into a [NavigationRoute].
+  NavigationRoute parseRouteResponse(Map<String, dynamic> data) {
     final routes = data['routes'] as List?;
     if (routes == null || routes.isEmpty) {
       throw const RouteException(

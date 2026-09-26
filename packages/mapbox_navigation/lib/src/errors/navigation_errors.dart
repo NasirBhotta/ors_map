@@ -107,6 +107,12 @@ final class InvalidConfigurationException extends NavigationException {
   const InvalidConfigurationException(super.message, {super.cause});
 }
 
+/// Exception thrown when an invalid navigation route is provided.
+@immutable
+final class InvalidRouteException extends NavigationException {
+  const InvalidRouteException(super.message, {super.cause});
+}
+
 /// Categorized lifecycle violations.
 enum LifecycleErrorReason {
   /// Attempted an operation while already in an active navigation session.

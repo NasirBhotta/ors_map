@@ -59,7 +59,7 @@ void main() {
           totalDurationSeconds: 0,
           steps: const [],
         ),
-        throwsA(isA<AssertionError>()),
+        throwsA(anyOf(isA<InvalidRouteException>(), isA<AssertionError>())),
       );
     });
 

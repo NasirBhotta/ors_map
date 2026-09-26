@@ -35,7 +35,9 @@ class _MapboxTestScreenState extends State<MapboxTestScreen> {
   mapbox.PointAnnotation? _destinationMarker;
 
   late final NavigationController _navigationController;
+  // ignore: experimental_member_use
   final NavigationCameraController _cameraController =
+      // ignore: experimental_member_use
       NavigationCameraController();
   StreamSubscription<NavigationState>? _navigationStateSub;
   StreamSubscription<NavigationEvent>? _navigationEventSub;

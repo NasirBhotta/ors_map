@@ -54,6 +54,7 @@ final class RenderGeneration {
 class MapboxRouteRenderCoordinator {
   final RouteRenderDelegate delegate;
   final void Function(Object error)? onError;
+  final double minProgressDeltaMeters;
 
   int _currentSessionId = 0;
   int _currentRouteRevision = 0;
@@ -70,6 +71,7 @@ class MapboxRouteRenderCoordinator {
   MapboxRouteRenderCoordinator({
     required this.delegate,
     this.onError,
+    this.minProgressDeltaMeters = 2.0,
   });
 
   bool get isDisposed => _disposed;
@@ -196,6 +198,11 @@ class MapboxRouteRenderCoordinator {
       _queuedProgressDistance = null;
 
       if (dist == _lastRenderedProgressDistance) continue;
+      if (_lastRenderedProgressDistance != null &&
+          (dist - _lastRenderedProgressDistance!).abs() < minProgressDeltaMeters &&
+          dist < route.totalDistanceMeters) {
+        continue;
+      }
 
       try {
         await delegate.updateRouteProgress(route, dist);

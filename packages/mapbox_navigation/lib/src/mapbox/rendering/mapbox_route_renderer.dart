@@ -12,16 +12,39 @@ final class MapboxRouteRenderer {
   final mapbox.MapboxMap mapboxMap;
   final MapboxRouteTheme theme;
 
-  static const String routeSourceId = 'route-source';
-  static const String traveledSourceId = 'traveled-source';
-  static const String routeCasingLayerId = 'route-casing-layer';
-  static const String routeLayerId = 'route-layer';
-  static const String traveledLayerId = 'traveled-layer';
+  static const String routeSourceId = 'mapbox-nav-route-source';
+  static const String traveledSourceId = 'mapbox-nav-traveled-source';
+  static const String routeCasingLayerId = 'mapbox-nav-route-casing-layer';
+  static const String routeLayerId = 'mapbox-nav-route-layer';
+  static const String traveledLayerId = 'mapbox-nav-traveled-layer';
+
+  NavigationRoute? _cachedRoute;
+  List<List<double>> _cachedCoords = const [];
+  List<double> _cachedCumulativeDistances = const [];
 
   MapboxRouteRenderer({
     required this.mapboxMap,
     this.theme = const MapboxRouteTheme(),
   });
+
+  void _ensureRouteCached(NavigationRoute route) {
+    if (identical(route, _cachedRoute)) return;
+    _cachedRoute = route;
+    final coords = <List<double>>[];
+    final distances = <double>[0.0];
+    for (var i = 0; i < route.geometry.length; i++) {
+      final p = route.geometry[i];
+      coords.add([p.longitude, p.latitude]);
+      if (i > 0) {
+        final prev = coords[i - 1];
+        final curr = coords[i];
+        final d = _haversine(prev[1], prev[0], curr[1], curr[0]);
+        distances.add(distances.last + d);
+      }
+    }
+    _cachedCoords = coords;
+    _cachedCumulativeDistances = distances;
+  }
 
   /// Draws the complete route lines onto the Mapbox map.
   Future<void> drawRoute(
@@ -29,8 +52,9 @@ final class MapboxRouteRenderer {
     String? belowLayerId,
   }) async {
     await clearRoute();
+    _ensureRouteCached(route);
 
-    final coords = route.geometry.map((p) => [p.longitude, p.latitude]).toList();
+    final coords = _cachedCoords;
 
     await mapboxMap.style.addSource(
       mapbox.GeoJsonSource(id: traveledSourceId, data: _lineGeoJson([])),
@@ -129,6 +153,10 @@ final class MapboxRouteRenderer {
 
   /// Removes all route layers and sources from the Mapbox style.
   Future<void> clearRoute() async {
+    _cachedRoute = null;
+    _cachedCoords = const [];
+    _cachedCumulativeDistances = const [];
+
     for (final id in [routeLayerId, traveledLayerId, routeCasingLayerId]) {
       try {
         await mapboxMap.style.removeStyleLayer(id);
@@ -149,8 +177,8 @@ final class MapboxRouteRenderer {
   ) async {
     if (route.geometry.length < 2) return;
 
-    final coords = route.geometry.map((p) => [p.longitude, p.latitude]).toList();
-    final split = _splitRouteAtDistance(coords, distanceAlongRouteMeters);
+    _ensureRouteCached(route);
+    final split = _splitRouteAtDistance(distanceAlongRouteMeters);
 
     try {
       final traveledSource =
@@ -264,58 +292,58 @@ final class MapboxRouteRenderer {
     });
   }
 
-  _RouteSplit _splitRouteAtDistance(
-    List<List<double>> coords,
-    double distanceAlongRouteMeters,
-  ) {
-    final totalDistance = _routeLength(coords);
+  _RouteSplit _splitRouteAtDistance(double distanceAlongRouteMeters) {
+    final coords = _cachedCoords;
+    final distances = _cachedCumulativeDistances;
+    if (coords.length < 2 || distances.length < 2) {
+      return _RouteSplit(traveled: coords, remaining: coords);
+    }
+
+    final totalDistance = distances.last;
     final targetDistance = distanceAlongRouteMeters.clamp(0.0, totalDistance);
-    final traveled = <List<double>>[];
-    final remaining = <List<double>>[];
 
-    var cumulative = 0.0;
-    for (var i = 0; i < coords.length - 1; i++) {
-      final a = coords[i];
-      final b = coords[i + 1];
-      final segmentLength = _haversine(a[1], a[0], b[1], b[0]);
+    // Fast binary search to find segment index containing targetDistance
+    var low = 0;
+    var high = distances.length - 1;
+    var result = distances.length - 1;
 
-      if (cumulative + segmentLength < targetDistance) {
-        if (traveled.isEmpty) traveled.add(a);
-        traveled.add(b);
-        cumulative += segmentLength;
-        continue;
+    while (low <= high) {
+      final mid = (low + high) >> 1;
+      if (distances[mid] >= targetDistance) {
+        result = mid;
+        high = mid - 1;
+      } else {
+        low = mid + 1;
       }
-
-      final fraction = segmentLength == 0
-          ? 0.0
-          : ((targetDistance - cumulative) / segmentLength).clamp(0.0, 1.0);
-      final splitPoint = <double>[
-        a[0] + (b[0] - a[0]) * fraction,
-        a[1] + (b[1] - a[1]) * fraction,
-      ];
-
-      if (traveled.isEmpty) traveled.add(a);
-      traveled.add(splitPoint);
-      remaining
-        ..add(splitPoint)
-        ..addAll(coords.sublist(i + 1));
-      return _RouteSplit(traveled: traveled, remaining: remaining);
     }
 
-    return _RouteSplit(traveled: coords, remaining: [coords.last]);
-  }
+    final segIdx = (result == 0 ? 0 : result - 1).clamp(0, distances.length - 2);
+    final startDist = distances[segIdx];
+    final endDist = distances[segIdx + 1];
+    final segLength = endDist - startDist;
+    final fraction = segLength <= 0.0
+        ? 0.0
+        : ((targetDistance - startDist) / segLength).clamp(0.0, 1.0);
 
-  double _routeLength(List<List<double>> coords) {
-    var total = 0.0;
-    for (var i = 0; i < coords.length - 1; i++) {
-      total += _haversine(
-        coords[i][1],
-        coords[i][0],
-        coords[i + 1][1],
-        coords[i + 1][0],
-      );
+    final a = coords[segIdx];
+    final b = coords[segIdx + 1];
+    final splitPoint = <double>[
+      a[0] + (b[0] - a[0]) * fraction,
+      a[1] + (b[1] - a[1]) * fraction,
+    ];
+
+    final traveled = <List<double>>[];
+    for (var i = 0; i <= segIdx; i++) {
+      traveled.add(coords[i]);
     }
-    return total;
+    traveled.add(splitPoint);
+
+    final remaining = <List<double>>[splitPoint];
+    for (var i = segIdx + 1; i < coords.length; i++) {
+      remaining.add(coords[i]);
+    }
+
+    return _RouteSplit(traveled: traveled, remaining: remaining);
   }
 
   double _haversine(double lat1, double lng1, double lat2, double lng2) {

@@ -101,13 +101,19 @@ class RouteMatcher {
           fix.accuracyMeters * forwardWindowAccuracyFactor,
     );
 
+    final threshold = min(
+      max(offRouteBaseMeters, fix.accuracyMeters * 2.5),
+      accuracyCapMeters,
+    );
+
     var bestCross = double.infinity;
     var bestIndex = 0;
     var bestAlongRoute = 0.0;
     var bestFraction = 0.0;
     var bestSegIndex = 0;
     var bestBearing = lastBearing;
-    var bestSnapped = coords.first;
+    var bestLat = coords.first.latitude;
+    var bestLng = coords.first.longitude;
 
     var fallCross = double.infinity;
     var fallIndex = 0;
@@ -115,9 +121,22 @@ class RouteMatcher {
     var fallFraction = 0.0;
     var fallSegIndex = 0;
     var fallBearing = lastBearing;
-    var fallSnapped = coords.first;
+    var fallLat = coords.first.latitude;
+    var fallLng = coords.first.longitude;
 
-    for (var i = 0; i < coords.length - 1; i++) {
+    int scanStart = 0;
+    int scanEnd = coords.length - 1;
+    double? backLimit;
+    double? fwdLimit;
+
+    if (inTracking && committedDistance > 0.0) {
+      backLimit = committedDistance - maxBackwardClampingMeters;
+      fwdLimit = committedDistance + forwardWindowMeters;
+      scanStart = max(0, metrics.segmentIndexForDistance(backLimit) - 1);
+      scanEnd = min(coords.length - 1, metrics.segmentIndexForDistance(fwdLimit) + 2);
+    }
+
+    void evaluateSegment(int i) {
       final a = coords[i];
       final b = coords[i + 1];
 
@@ -153,29 +172,29 @@ class RouteMatcher {
 
       final snappedLng = a.longitude + (b.longitude - a.longitude) * clampedT;
       final snappedLat = a.latitude + (b.latitude - a.latitude) * clampedT;
-      final candidateSnapped = GeoPoint(latitude: snappedLat, longitude: snappedLng);
-      final routeBearing = metrics.bearingAtDistance(
-        distanceMeters: candidateAlongRoute,
-        fallbackBearing: lastBearing,
+      final segBearing = RouteMetrics.bearingBetween(
+        a.latitude,
+        a.longitude,
+        b.latitude,
+        b.longitude,
       );
 
-      // Update global fallback
+      // Global candidate tracking
       if (cross < fallCross) {
         fallCross = cross;
         fallIndex = candidateIndex;
         fallAlongRoute = candidateAlongRoute;
         fallFraction = clampedT;
         fallSegIndex = i;
-        fallBearing = routeBearing;
-        fallSnapped = candidateSnapped;
+        fallBearing = segBearing;
+        fallLat = snappedLat;
+        fallLng = snappedLng;
       }
 
-      // Apply window filter in tracking mode only when progress has been committed
-      if (inTracking && committedDistance > 0.0) {
-        final backLimit = committedDistance - maxBackwardClampingMeters;
-        final fwdLimit = committedDistance + forwardWindowMeters;
+      // Window filter candidate tracking
+      if (backLimit != null && fwdLimit != null) {
         if (candidateAlongRoute < backLimit || candidateAlongRoute > fwdLimit) {
-          continue;
+          return;
         }
       }
 
@@ -185,20 +204,44 @@ class RouteMatcher {
         bestAlongRoute = candidateAlongRoute;
         bestFraction = clampedT;
         bestSegIndex = i;
-        bestBearing = routeBearing;
-        bestSnapped = candidateSnapped;
+        bestBearing = segBearing;
+        bestLat = snappedLat;
+        bestLng = snappedLng;
       }
     }
 
-    if (fallCross < bestCross) {
+    // Pass 1: local tracking window (or entire route if not tracking with committed distance)
+    for (var i = scanStart; i < scanEnd; i++) {
+      evaluateSegment(i);
+    }
+
+    // Pass 2: only if tracking window failed to match within threshold and there are unscanned segments
+    if (inTracking && committedDistance > 0.0 && bestCross > threshold) {
+      for (var i = 0; i < scanStart; i++) {
+        evaluateSegment(i);
+      }
+      for (var i = scanEnd; i < coords.length - 1; i++) {
+        evaluateSegment(i);
+      }
+    }
+
+    // Prefer candidate within forward tracking window; only fall back to global candidate
+    // if no segment within the forward tracking window matched within acceptable cross-track threshold.
+    if ((bestCross > threshold || bestCross.isInfinite) && fallCross.isFinite) {
       bestCross = fallCross;
       bestIndex = fallIndex;
       bestAlongRoute = fallAlongRoute;
       bestFraction = fallFraction;
       bestSegIndex = fallSegIndex;
       bestBearing = fallBearing;
-      bestSnapped = fallSnapped;
+      bestLat = fallLat;
+      bestLng = fallLng;
     }
+
+    final finalBearing = metrics.bearingAtDistance(
+      distanceMeters: bestAlongRoute,
+      fallbackBearing: bestBearing,
+    );
 
     return RouteMatchCandidate(
       closestRouteIndex: bestIndex,
@@ -206,8 +249,8 @@ class RouteMatcher {
       distanceAlongRouteMeters: bestAlongRoute,
       segmentFraction: bestFraction,
       segmentIndex: bestSegIndex,
-      segmentBearing: bestBearing,
-      snappedPoint: bestSnapped,
+      segmentBearing: finalBearing,
+      snappedPoint: GeoPoint(latitude: bestLat, longitude: bestLng),
       routeRevision: routeRevision,
     );
   }

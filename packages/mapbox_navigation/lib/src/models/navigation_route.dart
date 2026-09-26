@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import '../errors/navigation_errors.dart';
 import 'geo_point.dart';
 import 'navigation_step.dart';
 
@@ -22,14 +23,24 @@ final class NavigationRoute {
     required this.totalDistanceMeters,
     required this.totalDurationSeconds,
     required List<NavigationStep> steps,
-  })  : assert(
-          geometry.length >= 2,
-          'Route geometry must contain at least 2 points',
-        ),
-        assert(totalDistanceMeters >= 0.0, 'totalDistanceMeters must be non-negative'),
-        assert(totalDurationSeconds >= 0.0, 'totalDurationSeconds must be non-negative'),
-        geometry = List<GeoPoint>.unmodifiable(geometry),
-        steps = List<NavigationStep>.unmodifiable(steps);
+  })  : geometry = List<GeoPoint>.unmodifiable(geometry),
+        steps = List<NavigationStep>.unmodifiable(steps) {
+    if (geometry.length < 2) {
+      throw const InvalidRouteException(
+        'Route geometry must contain at least 2 points',
+      );
+    }
+    if (!totalDistanceMeters.isFinite || totalDistanceMeters < 0.0) {
+      throw const InvalidRouteException(
+        'totalDistanceMeters must be a finite, non-negative number',
+      );
+    }
+    if (!totalDurationSeconds.isFinite || totalDurationSeconds < 0.0) {
+      throw const InvalidRouteException(
+        'totalDurationSeconds must be a finite, non-negative number',
+      );
+    }
+  }
 
   /// Human-readable distance text (e.g. "450 m" or "12.4 km").
   String get distanceText {

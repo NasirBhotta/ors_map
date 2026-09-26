@@ -1,0 +1,17 @@
+# Files and directories created by Flutter/Dart
+.dart_tool/
+.packages
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Symbolication and cache
+app.*.symbols
+app.*.map.json
+*.cache.dill.track.dill
+*.dill
+
+# IDE and OS
+.DS_Store
+.idea/
+*.iml

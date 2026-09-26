@@ -1,7 +1,14 @@
 name: mapbox_navigation
-description: "A reusable Flutter navigation layer for building custom Mapbox navigation experiences."
+description: "A reusable Flutter navigation engine and Mapbox presentation layer for building turn-by-turn navigation."
 version: 0.1.0-dev.1
 publish_to: 'none'
+repository: https://github.com/NasirBhotta/ors_map
+issue_tracker: https://github.com/NasirBhotta/ors_map/issues
+topics:
+  - navigation
+  - mapbox
+  - maps
+  - turn-by-turn
 
 environment:
   sdk: ^3.7.0
@@ -11,7 +18,7 @@ dependencies:
   flutter:
     sdk: flutter
   meta: ^1.15.0
-  mapbox_maps_flutter: 2.25.0
+  mapbox_maps_flutter: ^2.25.0
   http: ^1.6.0
   geolocator: ^14.0.2
 

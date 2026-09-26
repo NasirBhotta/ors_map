@@ -228,7 +228,111 @@ Always call `controller.dispose()` when the navigation session ends:
 
 ---
 
+## Platform Setup (Android & iOS)
+
+> [!IMPORTANT]
+> **Foreground Navigation Only**  
+> `mapbox_navigation` V1 provides turn-by-turn navigation strictly while the app is in the foreground. Background navigation (such as background GPS tracking, background route recalculation, or persistent background notifications) is **not supported** by the package core.
+>
+> **Host-Owned Permissions**  
+> The host application is strictly responsible for requesting location permissions from the user and directing users to system settings if permissions are denied or GPS is disabled. `NavigationMapView` and `NavigationController` will never trigger unexpected system permission dialogs.
+
+### Android Setup
+
+1. **Permissions (`android/app/src/main/AndroidManifest.xml`)**:
+   Add only the permissions required for foreground GPS and Directions API network access:
+   ```xml
+   <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+       <!-- Required for foreground turn-by-turn navigation -->
+       <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION"/>
+       <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION"/>
+       <uses-permission android:name="android.permission.INTERNET"/>
+       ...
+   </manifest>
+   ```
+   *(Do NOT include `ACCESS_BACKGROUND_LOCATION` or `FOREGROUND_SERVICE_LOCATION` unless your host application provides a separate, custom background service).*
+
+2. **Min SDK & Java Target (`android/app/build.gradle.kts`)**:
+   Mapbox Maps SDK requires a minimum Android SDK of 24:
+   ```kotlin
+   android {
+       ...
+       defaultConfig {
+           minSdk = 24
+           ...
+       }
+   }
+   ```
+
+3. **Mapbox Maven Downloads Repository (`android/build.gradle.kts`)**:
+   Configure the Mapbox Maven repository with your secret download token:
+   ```kotlin
+   allprojects {
+       repositories {
+           google()
+           mavenCentral()
+           maven {
+               url = uri("https://api.mapbox.com/downloads/v2/releases/maven")
+               authentication {
+                   create<BasicAuthentication>("basic")
+               }
+               credentials {
+                   username = "mapbox"
+                   password = System.getenv("MAPBOX_DOWNLOADS_TOKEN") ?: ""
+               }
+           }
+       }
+   }
+   ```
+
+---
+
+### iOS Setup
+
+1. **Location Description & Token (`ios/Runner/Info.plist`)**:
+   Add the mandatory foreground location usage description and access token reference:
+   ```xml
+   <dict>
+       ...
+       <!-- Required for foreground location access -->
+       <key>NSLocationWhenInUseUsageDescription</key>
+       <string>This application requires location access to provide turn-by-turn navigation guidance.</string>
+
+       <!-- Mapbox public access token -->
+       <key>MBXAccessToken</key>
+       <string>$(MAPBOX_ACCESS_TOKEN)</string>
+   </dict>
+   ```
+   *(Do NOT add `NSLocationAlwaysUsageDescription` or `UIBackgroundModes: location` unless your host application has independent background location capabilities).*
+
+2. **CocoaPods & Deployment Target (`ios/Podfile`)**:
+   Ensure the minimum deployment target is iOS 14.0 or higher:
+   ```ruby
+   platform :ios, '14.0'
+   ```
+
+---
+
+## Controller Ownership & Lifecycle Behavior
+
+### Caller Owns the Controller
+`NavigationController` lifecycle is strictly owned by the caller (or your screen state / dependency injection container):
+* **Screen transitions**: Popping a screen containing `NavigationMapView` detaches the Mapbox rendering delegates, cancels the 60fps display timer, and unhooks listeners without disposing the controller.
+* **Re-mounting**: When navigating back or opening a new screen with the same controller, a new `NavigationMapView` attaches cleanly to the active session.
+* **Disposal**: You must call `controller.dispose()` when the trip is completely terminated.
+
+### Application Lifecycle (`AppLifecycleState`)
+`NavigationMapView` automatically observes application lifecycle transitions:
+* **Background (`paused` / `inactive` / `hidden`)**: Cancels the 60fps vehicle animation timer immediately to prevent battery and CPU drain.
+* **Foreground (`resumed`)**: Calls `controller.evaluateFreshness()` to instantly recompute GPS fix age against current wall-clock time. If the GPS fix aged past `staleTimeout`, the state is marked stale, extrapolation is frozen, and vehicle pose reseeds cleanly from authoritative state without replaying missed animation frames or causing artificial visual jumps.
+
+---
+
 ## Known V1 Limitations
 
-- **Background Execution**: Background services (e.g. notifications, wakelocks) are host-owned and must be managed outside this package.
-- **Route Options**: Multi-alternative route selection and toll/avoid options can be configured on the `RouteProvider` level.
+- **Foreground Navigation Only**: True background location daemons, audio ducking, and persistent notification tray integration are host-owned and must be orchestrated outside this package.
+- **Online Route Calculation**: `MapboxRouteProvider` relies on the Mapbox Directions v5 API; full offline routing graph engines are not included.
+- **Geometric Polyline Matching**: Route snapping uses flat-earth orthogonal projection with heading penalties and search window clamping rather than a native road-network topology graph or Hidden Markov Model.
+- **Single Primary Route**: Multi-route alternative selection and intermediate waypoint re-ordering are not included in V1.
+- **Host-Owned Audio / TTS**: Turn instructions are emitted via `InstructionChangedEvent`; audio synthesis (e.g. `flutter_tts`) is kept separate for developer flexibility.
+- **Map View Concurrency**: Running multiple concurrent `NavigationMapView` widgets simultaneously on screen is not recommended due to native Mapbox style and model layer constraints. Sequential navigation sessions are fully supported.

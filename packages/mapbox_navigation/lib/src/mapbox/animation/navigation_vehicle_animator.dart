@@ -3,6 +3,7 @@ import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:mapbox_navigation/src/models/geo_point.dart';
+import 'package:mapbox_navigation/src/models/navigation_enums.dart';
 import 'package:mapbox_navigation/src/models/navigation_route.dart';
 import 'package:mapbox_navigation/src/models/navigation_state.dart';
 
@@ -61,6 +62,7 @@ class NavigationVehicleAnimator {
   // Active route polyline metrics for along-route animation
   final List<double> _routeCumulativeDistances = [];
   List<GeoPoint> _routeCoordinates = const [];
+  int _cachedSegmentIndex = 0;
 
   NavigationVehicleAnimator({
     required this.onPoseUpdated,
@@ -79,6 +81,7 @@ class NavigationVehicleAnimator {
   /// Updates polyline geometry when the route revision changes.
   void setRoute(NavigationRoute? route) {
     _routeCumulativeDistances.clear();
+    _cachedSegmentIndex = 0;
     if (route == null || route.geometry.length < 2) {
       _routeCoordinates = const [];
       return;
@@ -152,6 +155,7 @@ class NavigationVehicleAnimator {
   void reseed(GeoPoint position, {double? bearing}) {
     _displayPosition = position;
     _targetPosition = position;
+    _cachedSegmentIndex = 0;
     if (bearing != null) {
       _displayBearing = bearing;
       _targetBearing = bearing;
@@ -264,28 +268,64 @@ class NavigationVehicleAnimator {
     return currentDistance + delta.sign * maxTravelDistance;
   }
 
+  int _findSegmentIndex(double targetMeters) {
+    final distances = _routeCumulativeDistances;
+    if (distances.length <= 1) return 0;
+
+    // Check cached segment and immediate forward segment first (O(1) fast path)
+    final cached = _cachedSegmentIndex;
+    if (cached >= 0 && cached < distances.length - 1) {
+      if (targetMeters >= distances[cached] && targetMeters <= distances[cached + 1]) {
+        return cached;
+      }
+      final next = cached + 1;
+      if (next < distances.length - 1 &&
+          targetMeters >= distances[next] &&
+          targetMeters <= distances[next + 1]) {
+        _cachedSegmentIndex = next;
+        return next;
+      }
+    }
+
+    // Binary search fallback for arbitrary seeks / jumps (O(log N))
+    var low = 0;
+    var high = distances.length - 1;
+    var result = distances.length - 1;
+
+    while (low <= high) {
+      final mid = (low + high) >> 1;
+      if (distances[mid] >= targetMeters) {
+        result = mid;
+        high = mid - 1;
+      } else {
+        low = mid + 1;
+      }
+    }
+
+    final segIdx = (result == 0 ? 0 : result - 1).clamp(0, distances.length - 2);
+    _cachedSegmentIndex = segIdx;
+    return segIdx;
+  }
+
   GeoPoint? _positionAtRouteDistance(double distanceMeters) {
-    if (_routeCoordinates.length < 2 || _routeCumulativeDistances.isEmpty) {
+    if (_routeCoordinates.length < 2 || _routeCumulativeDistances.length < 2) {
       return null;
     }
 
     final clampedDistance =
         distanceMeters.clamp(0.0, _routeCumulativeDistances.last);
 
-    for (var i = 0; i < _routeCumulativeDistances.length - 1; i++) {
-      final startDist = _routeCumulativeDistances[i];
-      final endDist = _routeCumulativeDistances[i + 1];
-      if (clampedDistance >= startDist && clampedDistance <= endDist) {
-        final segLength = endDist - startDist;
-        final t = segLength == 0 ? 0.0 : (clampedDistance - startDist) / segLength;
-        return _lerpPosition(
-          from: _routeCoordinates[i],
-          to: _routeCoordinates[i + 1],
-          t: t.clamp(0.0, 1.0),
-        );
-      }
-    }
-    return _routeCoordinates.last;
+    final i = _findSegmentIndex(clampedDistance);
+    final startDist = _routeCumulativeDistances[i];
+    final endDist = _routeCumulativeDistances[i + 1];
+    final segLength = endDist - startDist;
+    final t = segLength <= 0 ? 0.0 : (clampedDistance - startDist) / segLength;
+
+    return _lerpPosition(
+      from: _routeCoordinates[i],
+      to: _routeCoordinates[i + 1],
+      t: t.clamp(0.0, 1.0),
+    );
   }
 
   GeoPoint _lerpPosition({
@@ -314,14 +354,64 @@ class NavigationVehicleAnimator {
     final sinDLat = sin(dLat / 2);
     final sinDLng = sin(dLng / 2);
     final a = sinDLat * sinDLat + cos(lat1Rad) * cos(lat2Rad) * sinDLng * sinDLng;
-    return 2 * r * asin(sqrt(a));
+    return 2 * r * asin(sqrt(a.clamp(0.0, 1.0)));
+  }
+
+  /// Temporarily pauses the animation loop during background or inactive lifecycle states.
+  ///
+  /// Cancels the 16ms periodic timer to eliminate background CPU and battery drain,
+  /// preserving existing display pose without resetting target state.
+  void pause() {
+    _animationTimer?.cancel();
+    _animationTimer = null;
+    _running = false;
+    _lastTickAt = null;
+  }
+
+  /// Resumes the animation loop upon returning to foreground.
+  ///
+  /// Evaluates real elapsed time against [predictionHorizon] to prevent timer backlog
+  /// replaying and large artificial jumps. If GPS fix is stale, extrapolation is frozen.
+  void resume(NavigationState? state) {
+    _lastTickAt = DateTime.now();
+    if (state == null || state.status != NavigationStatus.navigating) {
+      pause();
+      return;
+    }
+
+    final targetPos = state.matchedPoint ?? state.rawFix?.coordinate;
+    if (targetPos != null) {
+      final fixTime = state.locationQuality.timestamp ?? state.rawFix?.timestamp;
+      final isStale = fixTime == null ||
+          DateTime.now().difference(fixTime) > predictionHorizon;
+
+      _targetPosition = targetPos;
+      _targetBearing = state.bearingDegrees;
+      _targetRouteDistance = state.distanceAlongRouteMeters;
+      _targetSpeedMps = isStale ? 0.0 : max(0.0, state.speedMps);
+
+      // Reseed display directly from authoritative state to avoid visual jumps
+      _displayPosition = targetPos;
+      _displayBearing = state.bearingDegrees;
+      _displayRouteDistance = state.distanceAlongRouteMeters;
+
+      onPoseUpdated(
+        DisplayVehiclePose(
+          position: targetPos,
+          bearing: state.bearingDegrees,
+          routeDistanceMeters: state.distanceAlongRouteMeters,
+        ),
+      );
+
+      if (!isStale) {
+        _ensureAnimationLoop();
+      }
+    }
   }
 
   /// Cancels the animation timer and resets internal animator state.
   void stop() {
-    _animationTimer?.cancel();
-    _animationTimer = null;
-    _running = false;
+    pause();
     _displayPosition = null;
     _displayBearing = null;
     _displayRouteDistance = null;
@@ -329,8 +419,8 @@ class NavigationVehicleAnimator {
     _targetBearing = 0.0;
     _targetRouteDistance = null;
     _targetSpeedMps = 0.0;
-    _lastTickAt = null;
     _lastFixAt = null;
+    _cachedSegmentIndex = 0;
   }
 
   void dispose() {

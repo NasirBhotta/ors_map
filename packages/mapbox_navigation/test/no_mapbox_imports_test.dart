@@ -3,7 +3,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test('Pure core library contains no Mapbox imports or SDK references', () {
-    final libDir = Directory('lib');
+    final packageLib = Directory('packages/mapbox_navigation/lib');
+    final libDir = packageLib.existsSync() ? packageLib : Directory('lib');
     expect(libDir.existsSync(), isTrue, reason: 'lib directory must exist');
 
     final dartFiles = libDir
