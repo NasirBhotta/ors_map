@@ -18,8 +18,8 @@ dependencies:
   google_maps_flutter: ^2.14.0
   http: ^1.6.0
   mapbox_maps_flutter: ^2.25.0
-  mapbox_navigation:
-    path: packages/mapbox_navigation
+  mapbox_nav_core:
+    path: packages/mapbox_nav_core
 
 dev_dependencies:
   flutter_test:

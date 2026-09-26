@@ -1,0 +1,60 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'packages/mapbox_nav_core/**'
+      - '.github/workflows/ci.yml'
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'packages/mapbox_nav_core/**'
+      - '.github/workflows/ci.yml'
+
+jobs:
+  validate_package:
+    name: Validate mapbox_nav_core
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: 'stable'
+          cache: true
+
+      - name: Package dependencies
+        working-directory: packages/mapbox_nav_core
+        run: flutter pub get
+
+      - name: Verify package code formatting
+        working-directory: packages/mapbox_nav_core
+        run: dart format --output=none --set-exit-if-changed .
+
+      - name: Analyze package
+        working-directory: packages/mapbox_nav_core
+        run: flutter analyze
+
+      - name: Run package unit & stress tests
+        working-directory: packages/mapbox_nav_core
+        run: flutter test test
+
+      - name: Example dependencies
+        working-directory: packages/mapbox_nav_core/example
+        run: flutter pub get
+
+      - name: Analyze example app
+        working-directory: packages/mapbox_nav_core/example
+        run: flutter analyze
+
+      - name: Run example app tests
+        working-directory: packages/mapbox_nav_core/example
+        run: flutter test
+
+      - name: Dry-run pub.dev publishing
+        working-directory: packages/mapbox_nav_core
+        run: dart pub publish --dry-run

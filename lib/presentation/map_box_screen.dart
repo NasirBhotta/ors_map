@@ -9,7 +9,7 @@ import 'package:flutter_background_service/flutter_background_service.dart';
 import 'package:flutter_compass/flutter_compass.dart';
 import 'package:http/http.dart' as http;
 import 'package:mapbox_maps_flutter/mapbox_maps_flutter.dart' as mapbox;
-import 'package:mapbox_navigation/mapbox_navigation.dart';
+import 'package:mapbox_nav_core/mapbox_nav_core.dart';
 import 'package:ors_map_test/services/api_key_service.dart';
 import 'package:ors_map_test/services/background_nav_services.dart';
 import 'package:ors_map_test/services/tts_service.dart';

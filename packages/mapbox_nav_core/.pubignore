@@ -1,0 +1,22 @@
+# Development and build files
+.dart_tool/
+.packages
+.pub/
+build/
+*.log
+
+# Example build artifacts
+example/build/
+example/.dart_tool/
+example/android/local.properties
+example/android/.gradle/
+example/ios/Pods/
+example/ios/.symlinks/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+
+# Test coverage
+coverage/
